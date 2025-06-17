@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+# pgclone: prepares a PostgreSQL physical replica by syncing from primary
+# REQUIREMENT: Only supports physical replication, PostgreSQL 15+
+# NOTE: Replication slot is NOT used for pg_receivewal
+
+set -euo pipefail
+
+# ==== Default parameters ====
+PGPORT=5432
+REPLICA_WALDIR=""
+TEMP_WALDIR=""
+PARALLEL=4
+VERBOSE=0
+RSYNC_PORT=8873
+
+# ==== Global state ====
+PG_RECEIVEWAL_PID=""
+PG_RECEIVEWAL_WATCHDOG_PID=""
+CLEANUP_DONE=0
+RSYNC_SECRET=""
+RSYNCD_SSH_PID=""
+RSYNCD_WATCHDOG_PID=""
+WATCHDOG_PID=""
+
+# ==== Logging ====
+log() { [[ "$VERBOSE" == "1" ]] && echo "[$(date '+%F %T')] [pgclone] $*" >&2; }
+err() { echo "[$(date '+%F %T')] FATAL: $*" >&2; }
+fatal() { err "$@"; exit 1; }
+
+# ==== Cleanup ====
+# shellcheck disable=SC2317
+cleanup() {
+    rc=$?
+    if [[ "$CLEANUP_DONE" == "1" ]]; then exit "$rc"; fi
+    CLEANUP_DONE=1
+    log "Running cleanup (rc=$rc)..."
+
+    # Stop pg_receivewal
+    if [[ -n "${PG_RECEIVEWAL_PID:-}" ]]; then
+        log "Killing pg_receivewal PID=$PG_RECEIVEWAL_PID"
+        kill "$PG_RECEIVEWAL_PID" 2>/dev/null || true
+        wait "$PG_RECEIVEWAL_PID" 2>/dev/null || true
+    fi
+
+    # Stop pg_receivewal watchdog
+    if [[ -n "${PG_RECEIVEWAL_WATCHDOG_PID:-}" ]]; then
+        kill "$PG_RECEIVEWAL_WATCHDOG_PID" 2>/dev/null || true
+        wait "$PG_RECEIVEWAL_WATCHDOG_PID" 2>/dev/null || true
+    fi
+
+    # Stop rsyncd on master via ssh PID
+    if [[ -n "${RSYNCD_SSH_PID:-}" ]]; then
+        log "Stopping rsyncd (via SSH PID=$RSYNCD_SSH_PID)..."
+        kill "$RSYNCD_SSH_PID" 2>/dev/null || true
+        wait "$RSYNCD_SSH_PID" 2>/dev/null || true
+    fi
+
+    # Stop rsyncd watchdog
+    if [[ -n "${RSYNCD_WATCHDOG_PID:-}" ]]; then
+        kill "$RSYNCD_WATCHDOG_PID" 2>/dev/null || true
+        wait "$RSYNCD_WATCHDOG_PID" 2>/dev/null || true
+    fi
+
+    # Stop watchdog
+    if [[ -n "${WATCHDOG_PID:-}" ]]; then
+        kill "$WATCHDOG_PID" 2>/dev/null || true
+        wait "$WATCHDOG_PID" 2>/dev/null || true
+    fi
+
+    # Cleanup temp files
+    rm -f /tmp/all_files.txt /tmp/files_part_*
+
+    if [[ -d "${TEMP_WALDIR:-}" && "$TEMP_WALDIR" == /tmp/pgclone_temp.* ]]; then
+        log "Removing temp WAL dir $TEMP_WALDIR"
+        rm -rf "$TEMP_WALDIR"
+    fi
+
+    exit "$rc"
+}
+trap cleanup EXIT INT TERM
+
+# ==== Helpers ====
+validate_lsn_format() {
+    [[ "$1" =~ ^[0-9A-F]+/[0-9A-F]+$ ]] || fatal "Invalid LSN format: $1"
+}
+
+validate_ssh_key() {
+    local key="$1"
+    [[ -f "$key" && -r "$key" ]] || fatal "SSH key missing or unreadable: $key"
+}
+
+estimate_primary_size_mb() {
+    log "Estimating primary data size..."
+    local kb
+    kb=$(ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" "du -sk '$PRIMARY_PGDATA'" | awk '{print $1}')
+    [[ "$kb" =~ ^[0-9]+$ ]] || fatal "du failed on primary"
+    echo $((kb / 1024))
+}
+
+check_replica_disk_space() {
+    local dir="$1"
+    local required="$2"
+    local avail_kb
+    avail_kb=$(df -k "$dir" | awk 'NR==2 {print $4}')
+    local avail_mb=$((avail_kb / 1024))
+    [[ "$avail_mb" -lt "$required" ]] && fatal "Insufficient disk space: ${avail_mb}MB < ${required}MB"
+    log "Disk OK in $dir: ${avail_mb}MB free (need $required)"
+}
+
+# ==== Parse arguments ====
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --pghost) PGHOST="$2"; shift 2 ;;
+        --pgport) PGPORT="$2"; shift 2 ;;
+        --pguser) PGUSER="$2"; shift 2 ;;
+        --primary-pgdata) PRIMARY_PGDATA="$2"; shift 2 ;;
+        --replica-pgdata) REPLICA_PGDATA="$2"; shift 2 ;;
+        --replica-waldir) REPLICA_WALDIR="$2"; shift 2 ;;
+        --ssh-key) SSH_KEY="$2"; shift 2 ;;
+        --ssh-user) SSH_USER="$2"; shift 2 ;;
+        --temp-waldir) TEMP_WALDIR="$2"; shift 2 ;;
+        --parallel) PARALLEL="$2"; shift 2 ;;
+        --rsync-port) RSYNC_PORT="$2"; shift 2 ;;
+        --verbose) VERBOSE=1; shift ;;
+        *) fatal "Unknown arg: $1" ;;
+    esac
+done
+
+# ==== Validate ====
+: "${PGHOST:?--pghost required}"
+: "${PGUSER:?--pguser required}"
+: "${PRIMARY_PGDATA:?--primary-pgdata required}"
+: "${REPLICA_PGDATA:?--replica-pgdata required}"
+: "${SSH_KEY:?--ssh-key required}"
+: "${SSH_USER:?--ssh-user required}"
+[[ -z "${PGPASSWORD:-}" ]] && fatal "PGPASSWORD env variable is required"
+[[ "$PGPORT" =~ ^[0-9]+$ ]] || fatal "Invalid port"
+[[ "$PARALLEL" =~ ^[0-9]+$ ]] || fatal "Invalid parallel"
+
+TEMP_WALDIR="${TEMP_WALDIR:-$(mktemp -d -t pgclone_temp.XXXX)}"
+REPLICA_WALDIR="${REPLICA_WALDIR:-$REPLICA_PGDATA/pg_wal}"
+
+validate_ssh_key "$SSH_KEY"
+mkdir -p "$REPLICA_PGDATA" "$REPLICA_WALDIR" "$TEMP_WALDIR"
+
+# ==== Check tools ====
+for t in ssh psql pg_receivewal rsync find xargs du split awk; do
+    command -v "$t" >/dev/null || fatal "$t not found"
+done
+
+# ==== Check SSH connection ====
+ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" "echo OK" >/dev/null ||
+    fatal "SSH test failed"
+
+# ==== Disk space check ====
+primary_size=$(estimate_primary_size_mb)
+required_space=$((primary_size * 1))
+check_replica_disk_space "$REPLICA_PGDATA" "$required_space"
+
+# ==== Open persistent psql session ====
+log "Open persistent psql session..."
+PSQL_IN=$(mktemp -u)
+PSQL_OUT=$(mktemp -u)
+mkfifo "$PSQL_IN" "$PSQL_OUT"
+
+PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -w -X -A -t <"$PSQL_IN" >"$PSQL_OUT" &
+PSQL_PID=$!
+
+exec 3>"$PSQL_IN"
+
+psql_send() { echo "$1" >&3; }
+psql_wait() { grep -m 1 . <"$PSQL_OUT"; }
+
+# ==== PostgreSQL version ====
+psql_send "SHOW server_version_num;"
+ver=$(psql_wait | tr -d '[:space:]')
+[[ -z "$ver" ]] && fatal "Could not retrieve PostgreSQL version"
+[[ "$ver" -ge 150000 ]] || fatal "PostgreSQL >= 15 required"
+
+# ==== Start pg_receivewal (no slot) ====
+log "Starting pg_receivewal (no slot)..."
+pg_receivewal \
+    --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
+    --no-password --directory="$TEMP_WALDIR" \
+    --verbose >"$TEMP_WALDIR/pg_receivewal.log" 2>&1 &
+PG_RECEIVEWAL_PID=$!
+sleep 3
+kill -0 "$PG_RECEIVEWAL_PID" 2>/dev/null || fatal "pg_receivewal failed"
+
+# ==== Watchdog for pg_receivewal ====
+(
+    main_pid=$$
+    wal_pid="$PG_RECEIVEWAL_PID"
+    while kill -0 "$main_pid" 2>/dev/null; do sleep 1; done
+    log "[watchdog] Main process $main_pid died, killing pg_receivewal PID $wal_pid"
+    kill "$wal_pid" 2>/dev/null
+) &
+PG_RECEIVEWAL_WATCHDOG_PID=$!
+
+# ==== Backup start ====
+psql_send "SELECT * FROM pg_backup_start('pgclone', true);"
+START_LSN=$(psql_wait | awk -F '|' '{print $1}' | tr -d '[:space:]')
+validate_lsn_format "$START_LSN"
+log "Backup start LSN: $START_LSN"
+
+# ==== Parallel rsync sync (rsyncd + watchdog on replica) ====
+log "Setting up parallel rsync with rsyncd on master..."
+
+RSYNC_SECRET=$(openssl rand -hex 12)
+RSYNC_SECRET_FILE=$(mktemp)
+echo "$RSYNC_SECRET" > "$RSYNC_SECRET_FILE"
+chmod 600 "$RSYNC_SECRET_FILE"
+
+RSYNCD_CONF=$(cat <<EOF
+uid = postgres
+gid = postgres
+use chroot = no
+max connections = $PARALLEL
+port = $RSYNC_PORT
+pid file = /tmp/rsyncd.pid
+log file = /tmp/rsyncd.log
+[pgdata]
+    path = $PRIMARY_PGDATA
+    comment = PostgreSQL data
+    read only = yes
+    auth users = replica
+    secrets file = /tmp/rsyncd.secrets
+EOF
+)
+# Deploy configs and secret
+ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" "echo '$RSYNCD_CONF' > /tmp/rsyncd.conf"
+ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" "echo 'replica:$RSYNC_SECRET' > /tmp/rsyncd.secrets && chmod 600 /tmp/rsyncd.secrets"
+
+# Start rsyncd via SSH in background, store its PID in RSYNCD_SSH_PID
+log "Starting rsyncd daemon on master via SSH..."
+ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" \
+    "bash -c '
+        rsync --daemon --no-detach --config=/tmp/rsyncd.conf --port=$RSYNC_PORT &
+        echo \$! > /tmp/rsyncd_own_pid
+        wait
+    '" \
+    </dev/null >/dev/null 2>&1 &
+RSYNCD_SSH_PID=$!
+
+# Watchdog: if main process dies, kill ssh (which stops rsyncd)
+(
+    main_pid=$$
+    ssh_pid="$RSYNCD_SSH_PID"
+    while kill -0 "$main_pid" 2>/dev/null; do sleep 1; done
+    log "[watchdog] Main process $main_pid died, killing rsyncd SSH PID $ssh_pid"
+    kill "$ssh_pid" 2>/dev/null
+) &
+RSYNCD_WATCHDOG_PID=$!
+
+sleep 2
+
+# ==== Initial rsync of all PGDATA except pg_wal and base ====
+log "Initial rsync of PGDATA (excluding base and pg_wal)..."
+rsync -a --delete \
+    --exclude 'pg_wal/' \
+    --exclude 'base/' \
+    --stats --human-readable \
+    --password-file="$RSYNC_SECRET_FILE" \
+    "rsync://replica@$PGHOST:$RSYNC_PORT/pgdata/" "$REPLICA_PGDATA/"
+
+# Ensure empty base and pg_wal directories exist
+mkdir -p "$REPLICA_PGDATA/base" "$REPLICA_PGDATA/pg_wal"
+
+# ==== Parallel rsync of base subdirectories using xargs ====
+log "Getting list of base subdirectories from master..."
+BASE_LIST=$(rsync --list-only --password-file="$RSYNC_SECRET_FILE" \
+    "rsync://replica@$PGHOST:$RSYNC_PORT/pgdata/base/" | awk '/^d/ {print $5}' | grep -v '^$')
+
+log "Starting parallel rsync of base subdirectories with up to $PARALLEL jobs..."
+
+echo "$BASE_LIST" | xargs -P"$PARALLEL" -I{} \
+    rsync -a --delete --inplace \
+        --stats --human-readable \
+        --password-file="$RSYNC_SECRET_FILE" \
+        "rsync://replica@$PGHOST:$RSYNC_PORT/pgdata/base/{}/" "$REPLICA_PGDATA/base/{}/" 
+
+rm -f "$RSYNC_SECRET_FILE"
+
+log "Parallel sync of base subdirectories complete"
+log "Parallel rsync done"
+
+# ==== Stop backup ====
+log "Stopping backup..."
+psql_send "SELECT pg_backup_stop(true);"
+psql_wait || fatal "pg_backup_stop failed"
+
+log "Closing persistent psql session..."
+psql_send '\q'
+wait "$PSQL_PID"
+rm -f "$PSQL_IN" "$PSQL_OUT"
+
+# ==== Stop pg_receivewal ====
+log "Stopping pg_receivewal..."
+if kill -0 "$PG_RECEIVEWAL_PID"; then
+    kill -TERM "$PG_RECEIVEWAL_PID"
+    wait "$PG_RECEIVEWAL_PID" || true
+fi
+
+# ==== Move WAL files ====
+log "Moving WAL to $REPLICA_WALDIR..."
+find "$TEMP_WALDIR" -type f -exec mv -f {} "$REPLICA_WALDIR/" \;
+rm -rf "$TEMP_WALDIR"
+TEMP_WALDIR=""
+
+log "Renaming partial WAL files..."
+find "$REPLICA_WALDIR/" -type f -name '*.partial' -exec bash -c 'for f; do mv "$f" "${f%.partial}"; done' _ {} +
+
+# ==== Final checks ====
+for f in PG_VERSION postgresql.conf pg_hba.conf; do
+    [[ -f "$REPLICA_PGDATA/$f" ]] || fatal "Missing file: $f"
+done
+wal_count=$(find "$REPLICA_WALDIR" -type f -name '[0-9A-F]*' | wc -l)
+[[ "$wal_count" -gt 0 ]] || fatal "No WAL files in $REPLICA_WALDIR"
+log "Found $wal_count WAL files"
+
+chmod 700 "$REPLICA_PGDATA" "$REPLICA_WALDIR" || log "chmod failed"
+
+log "Replica prepared. Don't forget:"
+log "  1. Create standby.signal in $REPLICA_PGDATA"
+log "  2. Configure postgresql.conf with primary_conninfo"
+log "  3. Start PostgreSQL"
+
+exit 0
