@@ -26,10 +26,11 @@
 
 ## Installation
 
-1. **Clone the repository:**
+1. **Get the script:**
     ```bash
+    cd /path/to/dir
     curl https://raw.githubusercontent.com/vbp1/pgclone.sh/refs/heads/main/pgclone
-    chmod +x 
+    chmod +x ./pgclone
     ```
 
 2. **Adjust variables/configuration** as needed for your environment.
@@ -41,7 +42,17 @@
 ```bash
 export PGPASSWORD=your_pg_password
 
-./pgclone   --pghost <primary_host>   --pgport 5432   --pguser postgres   --primary-pgdata /var/lib/postgresql/data   --replica-pgdata /var/lib/postgresql/data   --temp-waldir /tmp/pg_wal   --ssh-key /path/to/id_rsa   --ssh-user root   --parallel 4   --verbose
+./pgclone   
+    --pghost <primary_host>  \
+    --pgport 5432            \
+    --pguser postgres        \
+    --primary-pgdata /var/lib/postgresql/data  \
+    --replica-pgdata /var/lib/postgresql/data  \
+    --temp-waldir /tmp/pg_wal \
+    --ssh-key /path/to/id_rsa \
+    --ssh-user root \
+    --parallel 4    \
+    --verbose
 ```
 
 **Parameters:**
