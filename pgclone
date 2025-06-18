@@ -185,9 +185,16 @@ validate_ssh_key "$SSH_KEY"
 mkdir -p "$REPLICA_PGDATA" "$REPLICA_WALDIR" "$TEMP_WALDIR"
 
 # ==== Check tools ====
-for t in ssh psql pg_receivewal rsync find du split awk; do
+for t in ssh psql pg_receivewal rsync find du split awk sha256sum; do
     command -v "$t" >/dev/null || fatal "$t not found"
 done
+
+# ==== Protect against concurrent runs of pgclone for the same replica data directory. ====
+# The lock is automatically released when the script exits.
+REPLICA_PGDATA_ABS=$(readlink -f "$REPLICA_PGDATA")
+LOCK_FILE="/tmp/pgclone_$(echo -n "$REPLICA_PGDATA_ABS" | sha256sum | cut -d' ' -f1).lock"
+exec 200>"$LOCK_FILE"
+flock -n 200 || fatal "Another pgclone is running for $REPLICA_PGDATA_ABS (lock: $LOCK_FILE)"
 
 # ==== Check SSH connection ====
 ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" "echo OK" >/dev/null ||
