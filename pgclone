@@ -325,6 +325,13 @@ ssh -tt -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$P
   "RSYNCD_PORT_RANGE='$RSYNCD_PORT_RANGE' TARGET_HOST='$PGHOST' bash -s" <<'REMOTE_RS' >/dev/null 2>&1 &
 set -euo pipefail
 
+cleanup() {
+    [[ -n "${rsyncd_pid:-}" ]] && kill -9 "$rsyncd_pid" 2>/dev/null || true
+    [[ -n "${rsyncd_pid:-}" ]] && wait "$rsyncd_pid" 2>/dev/null || true
+    rm -f /tmp/rsyncd*
+}
+trap cleanup EXIT INT TERM
+
 # --- get UP for --pghost ---
 if [[ "$TARGET_HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     BIND_IP="$TARGET_HOST"
@@ -343,7 +350,6 @@ done
 [[ -z "$RSYNC_PORT" ]] && { echo "no free port"; exit 1; }
 echo "$RSYNC_PORT" > /tmp/rsyncd.port
 
-trap 'kill -9 $rsyncd_pid; wait $rsyncd_pid 2>/dev/null; rm -f /tmp/rsyncd* /tmp/rsyncd.port' SIGHUP INT TERM
 rsync --daemon --no-detach --config=/tmp/rsyncd.conf --port=$RSYNC_PORT &
 rsyncd_pid=$!
 wait
