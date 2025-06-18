@@ -449,12 +449,12 @@ COPY (
 ) TO STDOUT WITH (FORMAT text, DELIMITER '|');
 "
 
-IFS='|' read -r STOP_LSN BLABEL_B64 SPCMAP_B64 < <(psql_wait)
+IFS='|' read -r STOP_LSN BLABEL_B64 SPCMAP_B64 < <(psql_wait || fatal "pg_backup_stop failed")
 
 printf '%s' "$BLABEL_B64" | base64 --decode > "$REPLICA_PGDATA/backup_label"
 [[ -n $SPCMAP_B64 ]] && printf '%s' "$SPCMAP_B64" | base64 --decode > "$REPLICA_PGDATA/tablespace_map"
 
-# 3. Copy fresh pg_control produced by pg_backup_stop()
+# Copy fresh pg_control produced by pg_backup_stop()
 ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no \
     "$SSH_USER@$PGHOST" "cat '$PRIMARY_PGDATA/global/pg_control'" \
     > "$REPLICA_PGDATA/global/pg_control"
