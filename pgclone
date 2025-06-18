@@ -440,8 +440,26 @@ log "Parallel rsync done"
 
 # ==== Stop backup ====
 log "Stopping backup..."
-psql_send "SELECT pg_backup_stop(true);"
-psql_wait || fatal "pg_backup_stop failed"
+psql_send "
+COPY (
+  SELECT lsn,
+         translate(encode(labelfile::bytea,  'base64'), E'\n', '') AS lab_b64,
+         translate(encode(spcmapfile::bytea, 'base64'), E'\n', '') AS map_b64
+  FROM   pg_backup_stop(true)
+) TO STDOUT WITH (FORMAT text, DELIMITER '|');
+"
+
+IFS='|' read -r STOP_LSN BLABEL_B64 SPCMAP_B64 < <(psql_wait)
+
+printf '%s' "$BLABEL_B64" | base64 --decode > "$REPLICA_PGDATA/backup_label"
+[[ -n $SPCMAP_B64 ]] && printf '%s' "$SPCMAP_B64" | base64 --decode > "$REPLICA_PGDATA/tablespace_map"
+
+# 3. Copy fresh pg_control produced by pg_backup_stop()
+ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no \
+    "$SSH_USER@$PGHOST" "cat '$PRIMARY_PGDATA/global/pg_control'" \
+    > "$REPLICA_PGDATA/global/pg_control"
+
+log "Backup stopped at LSN $STOP_LSN and control files written"
 
 log "Closing persistent psql session..."
 psql_send '\q'
