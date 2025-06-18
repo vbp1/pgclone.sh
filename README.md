@@ -18,7 +18,7 @@
 
 - Bash 4+
 - PostgreSQL 15 or newer (no `pg_basebackup` required)
-- Tools: `psql`, `pg_receivewal`, `rsync`, `ssh`, `awk`, `xargs`, `find`, `du`, `split`, `openssl`
+- Tools: `psql`, `pg_receivewal`, `rsync`, `ssh`, `awk`, `find`, `du`, `split`, `sha256sum`, `od`
 - SSH key-based access to the primary server (no password prompt)
 - Sufficient privileges (root or postgres) on both servers
 

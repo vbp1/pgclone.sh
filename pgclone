@@ -14,6 +14,7 @@ TEMP_WALDIR=""
 PARALLEL=4
 VERBOSE=0
 RSYNC_PORT=8873
+PGCLONE_LOCK_FD=200
 
 # ==== Global state ====
 PG_RECEIVEWAL_PID=""
@@ -87,6 +88,15 @@ cleanup() {
     if [[ -d "${TEMP_WALDIR:-}" && "$TEMP_WALDIR" == /tmp/pgclone_temp.* ]]; then
         log "Removing temp WAL dir $TEMP_WALDIR"
         rm -rf "$TEMP_WALDIR"
+    fi
+
+    # Cleanup lock if exists
+    if [[ -n "${LOCK_FILE:-}" && -f "$LOCK_FILE" ]]; then
+        # Delete the lock file only if we still hold its file descriptor 
+        # (i.e., the file descriptor is still open).
+        if flock -n 200; then
+            rm -f "$LOCK_FILE"
+        fi
     fi
 
     exit "$rc"
@@ -185,7 +195,7 @@ validate_ssh_key "$SSH_KEY"
 mkdir -p "$REPLICA_PGDATA" "$REPLICA_WALDIR" "$TEMP_WALDIR"
 
 # ==== Check tools ====
-for t in ssh psql pg_receivewal rsync find du split awk sha256sum; do
+for t in ssh psql pg_receivewal rsync find du split awk sha256sum od; do
     command -v "$t" >/dev/null || fatal "$t not found"
 done
 
@@ -256,7 +266,7 @@ log "Backup start LSN: $START_LSN"
 # ==== Parallel rsync sync (rsyncd + watchdog on replica) ====
 log "Setting up parallel rsync with rsyncd on master..."
 
-RSYNC_SECRET=$(openssl rand -hex 12)
+RSYNC_SECRET=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
 RSYNC_SECRET_FILE=$(mktemp)
 echo "$RSYNC_SECRET" > "$RSYNC_SECRET_FILE"
 chmod 600 "$RSYNC_SECRET_FILE"
