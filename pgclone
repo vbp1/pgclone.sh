@@ -130,6 +130,7 @@ check_replica_disk_space() {
     log "Disk OK in $dir: ${avail_mb}MB free (need $required)"
 }
 
+
 ### MAIN SCRIPT STARTS HERE ###
 
 # ==== Parse arguments ====
@@ -233,13 +234,14 @@ ver=$(psql_wait | tr -d '[:space:]')
 [[ "$ver" -ge 150000 ]] || fatal "PostgreSQL >= 15 required"
 
 # ==== Start pg_receivewal (no slot) ====
-log "Starting pg_receivewal (no slot)..."
+PG_RCV_APPNAME="pgclone-$$"      # unique application_name for this run
+log "Starting pg_receivewal (appname=$PG_RCV_APPNAME, no slot)..."
 if [[ "$VERBOSE" == "1" ]]; then
     pg_rwal_args+=(--verbose)
 else
     pg_rwal_args+=()
 fi
-pg_receivewal \
+PGAPPNAME="$PG_RCV_APPNAME" pg_receivewal \
     --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
     --no-password --directory="$TEMP_WALDIR" \
     "${pg_rwal_args[@]}" >"$TEMP_WALDIR/pg_receivewal.log" 2>&1 &
@@ -255,6 +257,31 @@ kill -0 "$PG_RECEIVEWAL_PID" 2>/dev/null || fatal "pg_receivewal failed"
     kill "$PG_RECEIVEWAL_PID" 2>/dev/null
 ) &
 PG_RECEIVEWAL_WATCHDOG_PID=$!
+
+# Wait until the walreceiver connection shows up in pg_stat_replication
+wait_for_replication_start() {
+    local appname t0 timeout
+    appname="$1" 
+    timeout="${2:-60}"
+    t0=$(date +%s)
+    log "Waiting for WAL stream to appear in pg_stat_replication (timeout=${timeout}s)..."
+    while (( $(date +%s) - t0 < timeout )); do
+        # Ensure pg_receivewal is still alive
+        kill -0 "$PG_RECEIVEWAL_PID" 2>/dev/null \
+            || fatal "pg_receivewal exited"
+
+        # Check pg_stat_replication for our application_name
+        psql_send "SELECT 1 FROM pg_stat_replication WHERE application_name='$appname' LIMIT 1;"
+        if [[ $(psql_wait | tr -d '[:space:]') == "1" ]]; then
+            log "WAL streaming is active, continuing..."
+            return 0
+        fi
+        sleep 1
+    done
+    fatal "Timeout ${timeout}s: WAL streaming did not start"
+}
+
+wait_for_replication_start "$PG_RCV_APPNAME"
 
 # ==== Backup start ====
 psql_send "SELECT * FROM pg_backup_start('pgclone', true);"
