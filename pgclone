@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="0.1.0"
+PGCLONE_VERSION="0.2.0"
 
 # ==== Default parameters ====
 PGPORT=5432
@@ -386,17 +386,28 @@ sleep 2
 rsync_log_args=()
 [[ "$VERBOSE" == "1" ]] && rsync_log_args+=(--stats --human-readable)
 
-# ==== Initial rsync of all PGDATA except pg_wal and base ====
-log "Initial rsync of PGDATA (excluding base and pg_wal)..."
+# ==== Initial rsync of all PGDATA except pg_wal and base, transient and temp files ====
+log "Initial rsync of PGDATA (excluding base, pg_wal, transient and temp files)..."
 rsync -a --delete \
     --exclude 'pg_wal/' \
     --exclude 'base/' \
+    --exclude 'postmaster.pid' \
+    --exclude 'postmaster.opts' \
+    --exclude 'pg_replslot/' \
+    --exclude 'pg_dynshmem/' \
+    --exclude 'pg_notify/' \
+    --exclude 'pg_serial/' \
+    --exclude 'pg_snapshots/' \
+    --exclude 'pg_stat_tmp/' \
+    --exclude 'pg_subtrans/' \
+    --exclude 'pgsql_tmp*' \
+    --exclude 'pg_internal.init' \
     "${rsync_log_args[@]}" \
     --password-file="$RSYNC_SECRET_FILE" \
     "rsync://replica@$PGHOST:$RSYNC_PORT/pgdata/" "$REPLICA_PGDATA/"
 
-# Ensure empty base and pg_wal directories exist
-mkdir -p "$REPLICA_PGDATA/base" "$REPLICA_PGDATA/pg_wal"
+# Ensure empty base directory exist
+mkdir -p "$REPLICA_PGDATA/base"
 
 # ==== Parallel rsync of every file in base using --files-from ====
 log "Building file list from primary..."
@@ -454,6 +465,8 @@ for idx in "${!parts[@]}"; do
     (
         log "===== rsync worker $((idx + 1)) starting (files-from: $part) ====="
         rsync -a --relative --inplace \
+              --exclude 'pgsql_tmp*' \
+              --exclude 'pg_internal.init' \
               "${rsync_log_args[@]}" \
               --files-from="$part" \
               --password-file="$RSYNC_SECRET_FILE" \
@@ -479,6 +492,21 @@ for idx in "${!RSYNC_LOGFILES[@]}"; do
 done
 
 rm -f "$RSYNC_SECRET_FILE"
+
+# Create empty subdirs for excluded runtime directories
+for d in pg_replslot pg_dynshmem pg_notify pg_serial pg_snapshots pg_stat_tmp pg_subtrans; do
+    mkdir -p "$REPLICA_PGDATA/$d"
+done
+
+# Ensure empty pg_wal directory exists
+if [[ "${REPLICA_WALDIR%/}" != "${REPLICA_PGDATA%/}/pg_wal" ]]; then
+    # If pg_wal is a separate directory, create a symlink in the pgdata directory
+    ln -s -f "$REPLICA_WALDIR" "$REPLICA_PGDATA/pg_wal"
+else
+    # If pg_wal is the subdir of pgdata, we need to ensure it exists
+    mkdir -p "$REPLICA_PGDATA/pg_wal"
+fi
+
 log "Parallel sync of base files complete"
 log "Parallel rsync done"
 
