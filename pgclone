@@ -19,6 +19,10 @@ RSYNCD_GET_PORT_TIMEOUT=30
 REPLICATION_START_TIMEOUT=60
 WAL_WAIT_TIMEOUT=60
 
+declare -A TBLSPCS=()          # oid -> src (master)
+declare -A TBLSPCS_SIZE_KB=()  # oid -> size KB
+declare -A TBLSPCS_DST=()      # oid -> dst (replica)
+
 # ==== Global state ====
 PG_RECEIVEWAL_PID=""
 PG_RECEIVEWAL_WATCHDOG_PID=""
@@ -131,9 +135,132 @@ check_replica_disk_space() {
     avail_kb=$(df -k "$dir" | awk 'NR==2 {print $4}')
     local avail_mb=$((avail_kb / 1024))
     [[ "$avail_mb" -lt "$required" ]] && fatal "Insufficient disk space: ${avail_mb}MB < ${required}MB"
-    log "Disk OK in $dir: ${avail_mb}MB free (need $required)"
+    log "Disk OK on $dir: ${avail_mb}MB free (need $required)"
 }
 
+discover_tablespaces() {
+    while IFS='|' read -r oid src size; do
+        [[ -z $oid || -z $src ]] && continue
+        TBLSPCS[$oid]="$src"
+        TBLSPCS_SIZE_KB[$oid]="$size"
+        TBLSPCS_DST[$oid]="$src"
+    done < <(
+        ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no \
+            "$SSH_USER@$PGHOST" \
+            "for l in '$PRIMARY_PGDATA'/pg_tblspc/*; do
+                 [ -L \"\$l\" ] || continue
+                 oid=\$(basename \"\$l\")
+                 tgt=\$(readlink -f \"\$l\")
+                 sz=\$(du -sk \"\$tgt\" | awk '{print \$1}')
+                 echo \"\$oid|\$tgt|\$sz\"
+             done"
+    )
+}
+
+check_tablespaces_space() {
+    declare -A need_kb
+    for oid in "${!TBLSPCS[@]}"; do
+        dst="${TBLSPCS_DST[$oid]}"
+        mkdir -p "$dst"
+        fs=$(df -P "$dst" | awk 'NR==2{print $6}')
+        need_kb[$fs]=$(( ${need_kb[$fs]:-0} + ${TBLSPCS_SIZE_KB[$oid]} ))
+    done
+    for fs in "${!need_kb[@]}"; do
+        avail=$(df -P "$fs" | awk 'NR==2{print $4}')
+        [[ $avail -lt ${need_kb[$fs]} ]] && fatal "Insufficient disk space on $fs: need $((need_kb[$fs]/1024))MB"
+        log "Disk OK on $fs: $((avail/1024))MB free (need $((need_kb[$fs]/1024))MB)"
+    done
+}
+
+# $1 = rsync-module, $2 = dst
+parallel_rsync_module() {
+    local module="$1" dst="$2"
+    local part_prefix file_raw file_sorted
+    local -a RSYNC_LOGFILES=()
+
+    # preparing list of files to copy
+    part_prefix=$(mktemp -u -t pgclone_part_"${module}".XXXX)
+    file_raw=$(mktemp -t pgclone_raw_"${module}".XXXX)
+    file_sorted=$(mktemp -t pgclone_sorted_"${module}".XXXX)
+    for ((i=0;i<PARALLEL;i++)); do :>"${part_prefix}_$i"; done
+
+    rsync --list-only --recursive \
+          --password-file="$RSYNC_SECRET_FILE" \
+          "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" |
+          awk '$1 ~ /^-/ {gsub(/,/, "", $2); print $2 "\t" $5}' > "$file_raw"
+    sort -nr "$file_raw" > "$file_sorted"
+
+    # --- Distribute files across workers (ring-hop heuristic) --------------------
+    #  1. `file_sorted` contains every file in the module, sorted by size (largest first).
+    #  2. `chunksize[i]` keeps current total size assigned to worker *i*.
+    #  3. We advance a cursor `cur` over the worker indexes in a “ring”:
+    #      cur, cur+1, cur+2 … (mod PARALLEL).
+    #    Before appending the next file we look one step ahead (`nxt`) —
+    #    if the next worker currently has a smaller cumulative size than
+    #    the current one, we hop to it (`cur = nxt`). This simple rule
+    #    evens the load without full bin-packing.
+    #  4. The selected worker’s file list is written to `${part_prefix}_$cur`
+    #    and its `chunksize` is updated.
+    #
+    #  After the loop we recreate the directory tree locally:
+    #   `file_raw` still has “size<TAB>path” pairs. We strip the path,
+    #   take parent directories, deduplicate and `mkdir -p` each of them
+    #   under the destination.  This ensures every sub-directory exists
+    #   before rsync starts with `--relative`.
+    # -----------------------------------------------------------------------------
+
+    declare -a chunksize; for ((i=0;i<PARALLEL;i++)); do chunksize[i]=0; done
+    cur=0
+    while IFS=$'\t' read -r sz path; do
+        nxt=$(( (cur+1)%PARALLEL ))
+        (( chunksize[nxt] < chunksize[cur] )) && cur=$nxt
+        echo "$path" >> "${part_prefix}_$cur"
+        chunksize[cur]=$(( chunksize[cur]+sz ))
+    done < "$file_sorted"
+
+    awk -F'\t' '{print $2}' "$file_raw" | awk -F/ 'NF>1{NF--;print}' OFS=/ | sort -u |
+        while read -r d; do mkdir -p "$dst/$d"; done
+
+    # run rsync workers in parallel
+    mapfile -t parts < <(ls "${part_prefix}"*)
+    pids=()
+    for idx in "${!parts[@]}"; do
+        local logfile
+        logfile=$(mktemp -t pgclone_rsync_"${module}"_"${idx}".XXXX)
+        RSYNC_LOGFILES+=("$logfile")
+        (
+            rsync -a --relative --inplace \
+                  --exclude 'pgsql_tmp*' \
+                  --exclude 'pg_internal.init' \
+                  "${rsync_log_args[@]}" \
+                  --files-from="${parts[$idx]}" \
+                  --password-file="$RSYNC_SECRET_FILE" \
+                  "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" "$dst/" \
+                  >"$logfile" 2>&1
+        ) &
+        pids+=($!)
+    done
+
+    # Wait for all rsync workers to finish
+    for p in "${pids[@]}"; do wait "$p"; done
+
+    # print rsync worker logs if verbose
+    if [[ "$VERBOSE" == "1" ]]; then
+        for idx in "${!RSYNC_LOGFILES[@]}"; do
+            if [[ -s "${RSYNC_LOGFILES[$idx]}" ]]; then
+                echo
+                echo "====== rsync worker $((idx + 1)) output log start ======"
+                cat  "${RSYNC_LOGFILES[$idx]}"
+                echo "====== rsync worker $((idx + 1)) output log end ======"
+                echo
+            fi
+        done
+    fi
+
+    # Cleanup temporary files
+    for f in "${RSYNC_LOGFILES[@]}"; do rm -f "$f"; done
+    rm -f "$file_raw" "$file_sorted" "${part_prefix}"*
+}
 
 ### MAIN SCRIPT STARTS HERE ###
 
@@ -197,6 +324,9 @@ REPLICA_WALDIR="${REPLICA_WALDIR:-$REPLICA_PGDATA/pg_wal}"
 
 validate_ssh_key "$SSH_KEY"
 mkdir -p "$REPLICA_PGDATA" "$REPLICA_WALDIR" "$TEMP_WALDIR"
+
+discover_tablespaces
+check_tablespaces_space
 
 # ==== Check tools ====
 for t in ssh psql pg_receivewal rsync find du split awk sha256sum od; do
@@ -315,21 +445,42 @@ RSYNC_SECRET_FILE=$(mktemp)
 echo "$RSYNC_SECRET" > "$RSYNC_SECRET_FILE"
 chmod 600 "$RSYNC_SECRET_FILE"
 
+tbl_cnt=${#TBLSPCS[@]}            # 0, if array is empty
+max_conn=$(( PARALLEL * (tbl_cnt + 2) ))
+
 RSYNCD_CONF=$(cat <<EOF
 uid = postgres
 gid = postgres
 use chroot = no
-max connections = $PARALLEL
+max connections = $max_conn
 pid file = /tmp/rsyncd.pid
 log file = /tmp/rsyncd.log
+
 [pgdata]
     path = $PRIMARY_PGDATA
-    comment = PostgreSQL data
+    read only = yes
+    auth users = replica
+    secrets file = /tmp/rsyncd.secrets
+
+[base]
+    path = $PRIMARY_PGDATA/base
     read only = yes
     auth users = replica
     secrets file = /tmp/rsyncd.secrets
 EOF
 )
+
+# add sections for tablespaces (if any)
+for oid in "${!TBLSPCS[@]}"; do
+    RSYNCD_CONF+=$(cat <<EOF
+[spc_$oid]
+    path = ${TBLSPCS[$oid]}
+    read only = yes
+    auth users = replica
+    secrets file = /tmp/rsyncd.secrets
+EOF
+)
+done
 
 ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" "echo '$RSYNCD_CONF' > /tmp/rsyncd.conf"
 ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" "echo 'replica:$RSYNC_SECRET' > /tmp/rsyncd.secrets && chmod 600 /tmp/rsyncd.secrets"
@@ -422,87 +573,15 @@ rsync -a --delete \
 # Ensure empty base directory exist
 mkdir -p "$REPLICA_PGDATA/base"
 
-# ==== Parallel rsync of every file in base using --files-from ====
-log "Building file list from primary..."
+log "Parallel rsync of base directory..."
+parallel_rsync_module "base" "$REPLICA_PGDATA/base"
+log "Base synced"
 
-# --- Build and split the file list for balanced rsync workers ---
-
-# 1. Gather the list of files (with their sizes in bytes) from the remote 'base' directory
-# Output format: <size_in_bytes>\t<relative_path>
-PART_PREFIX=$(mktemp -u -t pgclone_part.XXXXXX)
-FILELIST_RAW=$(mktemp -t pgclone_files_raw.XXXXXX)
-FILELIST_SORTED=$(mktemp -t pgclone_files_sorted.XXXXXX)
-for ((i=0; i<PARALLEL; i++)); do
-    echo > "${PART_PREFIX}_$i"
+log "Parallel rsync of tablespaces..."
+for oid in "${!TBLSPCS[@]}"; do
+    parallel_rsync_module "spc_$oid" "${TBLSPCS_DST[$oid]}"
 done
-
-# Get file sizes and paths using rsync --list-only (awk extracts the size and relative path)
-rsync --list-only --recursive \
-      --password-file="$RSYNC_SECRET_FILE" \
-      "rsync://replica@$PGHOST:$RSYNC_PORT/pgdata/base/" \
-      | awk '$1 ~ /^-/ {gsub(/,/, "", $2); print $2 "\t" $5}' > "$FILELIST_RAW"
-
-# 2. Sort all files in descending order of size (largest files first)
-sort -nr "$FILELIST_RAW" > "$FILELIST_SORTED"
-
-# 3. Distribute files among PARALLEL workers (ring-hop algorithm):
-chunksize=()
-for ((i=0; i<PARALLEL; i++)); do
-    chunksize[i]=0
-done
-
-curr_chank=0
-while IFS=$'\t' read -r sz path; do
-    next_chunk=$(( (curr_chank + 1) % PARALLEL ))
-    if (( chunksize[next_chunk] < chunksize[curr_chank] )); then
-        curr_chank=$next_chunk
-    fi
-    # Assign this file to the selected chunk
-    echo "$path" >> "${PART_PREFIX}_$curr_chank"
-    chunksize[curr_chank]=$(( ${chunksize[$curr_chank]} + sz ))
-done < "$FILELIST_SORTED"
-
-log "Creating directory tree locally..."
-awk -F'\t' '{print $2}' "$FILELIST_RAW" | awk -F/ 'NF>1{NF--; print}' OFS=/ | sort -u | while read -r d; do
-    mkdir -p "$REPLICA_PGDATA/base/$d"
-done
-
-log "Running $PARALLEL rsync workers..."
-pids=()
-
-mapfile -t parts < <(ls "${PART_PREFIX}"*)
-for idx in "${!parts[@]}"; do
-    part="${parts[$idx]}"
-    logfile=$(mktemp -t pgclone_rsync_log_"${idx}"_XXXXXX)
-    RSYNC_LOGFILES+=("$logfile")
-    (
-        log "===== rsync worker $((idx + 1)) starting (files-from: $part) ====="
-        rsync -a --relative --inplace \
-              --exclude 'pgsql_tmp*' \
-              --exclude 'pg_internal.init' \
-              "${rsync_log_args[@]}" \
-              --files-from="$part" \
-              --password-file="$RSYNC_SECRET_FILE" \
-              "rsync://replica@$PGHOST:$RSYNC_PORT/pgdata/base/" \
-              "$REPLICA_PGDATA/base/" >"$logfile" 2>&1
-        log "===== rsync worker $((idx + 1)) finished (files-from: $part) ====="
-    ) &
-    pids+=($!)
-done
-for pid in "${pids[@]}"; do
-    wait "$pid"
-done
-
-for idx in "${!RSYNC_LOGFILES[@]}"; do
-    if [[ -s "${RSYNC_LOGFILES[$idx]}" ]]; then
-        echo
-        echo "====== rsync worker $((idx + 1)) output log start ======"
-        cat "${RSYNC_LOGFILES[$idx]}"
-        echo "====== rsync worker $((idx + 1)) output log end ======"
-        echo
-    fi
-    rm -f "${RSYNC_LOGFILES[$idx]}"
-done
+log "Tablespaces synced"
 
 rm -f "$RSYNC_SECRET_FILE"
 
