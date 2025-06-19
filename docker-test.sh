@@ -45,7 +45,7 @@ set -euo pipefail
 
 echo ">>> Starting containers..."
 if [[ -z "${skip_container[$PRIMARY_CONTAINER]:-}" ]]; then
-    docker run -d \
+    docker run --init -d \
       --name "$PRIMARY_CONTAINER" \
       --network "$NETWORK" \
       -e POSTGRES_PASSWORD=postgres \
@@ -55,7 +55,7 @@ if [[ -z "${skip_container[$PRIMARY_CONTAINER]:-}" ]]; then
 fi
 
 if [[ -z "${skip_container[$REPLICA_CONTAINER]:-}" ]]; then
-    docker run -d \
+    docker run --init -d \
       --name "$REPLICA_CONTAINER" \
       --network "$NETWORK" \
       -e POSTGRES_PASSWORD=postgres \
