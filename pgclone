@@ -123,7 +123,8 @@ validate_ssh_key() {
 estimate_primary_size_mb() {
     log "Estimating primary data size..."
     local kb
-    kb=$(ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" "du -sk '$PRIMARY_PGDATA'" | awk '{print $1}')
+    # shellcheck disable=SC2029
+    kb=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "du -sk '$PRIMARY_PGDATA'" | awk '{print $1}')
     [[ "$kb" =~ ^[0-9]+$ ]] || fatal "du failed on primary"
     echo $((kb / 1024))
 }
@@ -138,6 +139,7 @@ check_replica_disk_space() {
     log "Disk OK on $dir: ${avail_mb}MB free (need $required)"
 }
 
+# shellcheck disable=SC2029
 discover_tablespaces() {
     while IFS='|' read -r oid src size; do
         [[ -z $oid || -z $src ]] && continue
@@ -145,7 +147,7 @@ discover_tablespaces() {
         TBLSPCS_SIZE_KB[$oid]="$size"
         TBLSPCS_DST[$oid]="$src"
     done < <(
-        ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no \
+        ssh "${SSH_OPTS[@]}" \
             "$SSH_USER@$PGHOST" \
             "for l in '$PRIMARY_PGDATA'/pg_tblspc/*; do
                  [ -L \"\$l\" ] || continue
@@ -325,6 +327,8 @@ REPLICA_WALDIR="${REPLICA_WALDIR:-$REPLICA_PGDATA/pg_wal}"
 validate_ssh_key "$SSH_KEY"
 mkdir -p "$REPLICA_PGDATA" "$REPLICA_WALDIR" "$TEMP_WALDIR"
 
+SSH_OPTS=("-i" "$SSH_KEY" "-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=no")
+
 discover_tablespaces
 check_tablespaces_space
 
@@ -354,7 +358,7 @@ if [[ -f "$PIDFILE" ]]; then
 fi
 
 # ==== Check SSH connection ====
-ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" "echo OK" >/dev/null ||
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "echo OK" >/dev/null ||
     fatal "SSH test failed"
 
 # ==== Disk space check ====
@@ -445,6 +449,17 @@ RSYNC_SECRET_FILE=$(mktemp)
 echo "$RSYNC_SECRET" > "$RSYNC_SECRET_FILE"
 chmod 600 "$RSYNC_SECRET_FILE"
 
+PGDATA_HASH=$(echo -n "$PRIMARY_PGDATA" | sha256sum | cut -c1-16)
+RSYNCD_TAG="pgclone_$PGDATA_HASH"
+
+REMOTE_DIR="/tmp/${RSYNCD_TAG}"
+REMOTE_CONF="$REMOTE_DIR/rsyncd.conf"
+REMOTE_SECR="$REMOTE_DIR/rsyncd.secrets"
+REMOTE_PID="$REMOTE_DIR/rsyncd.pid"
+REMOTE_PORT="$REMOTE_DIR/rsyncd.port"
+REMOTE_LOCK="$REMOTE_DIR/lock"
+
+
 tbl_cnt=${#TBLSPCS[@]}            # 0, if array is empty
 max_conn=$(( PARALLEL * (tbl_cnt + 2) ))
 
@@ -453,20 +468,20 @@ uid = postgres
 gid = postgres
 use chroot = no
 max connections = $max_conn
-pid file = /tmp/rsyncd.pid
-log file = /tmp/rsyncd.log
+pid file = $REMOTE_PID
+log file = $REMOTE_DIR/rsyncd.log
 
 [pgdata]
     path = $PRIMARY_PGDATA
     read only = yes
     auth users = replica
-    secrets file = /tmp/rsyncd.secrets
+    secrets file = $REMOTE_SECR
 
 [base]
     path = $PRIMARY_PGDATA/base
     read only = yes
     auth users = replica
-    secrets file = /tmp/rsyncd.secrets
+    secrets file = $REMOTE_SECR
 EOF
 )
 
@@ -482,18 +497,31 @@ EOF
 )
 done
 
-ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" "echo '$RSYNCD_CONF' > /tmp/rsyncd.conf"
-ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" "echo 'replica:$RSYNC_SECRET' > /tmp/rsyncd.secrets && chmod 600 /tmp/rsyncd.secrets"
+# shellcheck disable=SC2029
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "mkdir -p '$REMOTE_DIR'"
+# check if rsyncd is already running for this PGDATA
+# shellcheck disable=SC2029
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "exec 9> $REMOTE_LOCK && flock -n 9 || { echo 'rsyncd already running for this PGDATA'; exit 1; }"
+# shellcheck disable=SC2029
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "cat > '$REMOTE_CONF'" <<<"$RSYNCD_CONF"
+# shellcheck disable=SC2029
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "echo 'replica:$RSYNC_SECRET' > '$REMOTE_SECR' && chmod 600 '$REMOTE_SECR'"
 
 log "Starting rsyncd daemon on master via SSH..."
-ssh -tt -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" \
-  "RSYNCD_PORT_RANGE='$RSYNCD_PORT_RANGE' TARGET_HOST='$PGHOST' bash -s" <<'REMOTE_RS' >/dev/null 2>&1 &
+ssh -tt "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
+  "RSYNCD_PORT_RANGE='$RSYNCD_PORT_RANGE' TARGET_HOST='$PGHOST' \
+   REMOTE_DIR='$REMOTE_DIR' REMOTE_LOCK='$REMOTE_LOCK' \
+   REMOTE_CONF='$REMOTE_CONF' REMOTE_PORT='$REMOTE_PORT' \
+  bash -s" <<'REMOTE_RS' >/dev/null 2>&1 &
 set -euo pipefail
+
+exec 9> $REMOTE_LOCK
+flock -n 9 || { echo 'rsyncd already running for this PGDATA'; exit 1; }
 
 cleanup() {
     [[ -n "${rsyncd_pid:-}" ]] && kill -9 "$rsyncd_pid" 2>/dev/null || true
     [[ -n "${rsyncd_pid:-}" ]] && wait "$rsyncd_pid" 2>/dev/null || true
-    rm -f /tmp/rsyncd*
+    rm -rf $REMOTE_DIR
 }
 trap cleanup EXIT INT TERM
 
@@ -513,9 +541,9 @@ for ((p=pmin; p<=pmax; p++)); do
     RSYNC_PORT=$p; break                                       # available
 done
 [[ -z "$RSYNC_PORT" ]] && { echo "no free port"; exit 1; }
-echo "$RSYNC_PORT" > /tmp/rsyncd.port
+echo "$RSYNC_PORT" > "$REMOTE_PORT"
 
-rsync --daemon --no-detach --config=/tmp/rsyncd.conf --port=$RSYNC_PORT &
+rsync --daemon --no-detach --config=$REMOTE_CONF --port=$RSYNC_PORT &
 rsyncd_pid=$!
 wait
 REMOTE_RS
@@ -524,9 +552,10 @@ RSYNCD_SSH_PID=$!
 # get rsyncd port from remote
 timeout_sec=$RSYNCD_GET_PORT_TIMEOUT
 t_start=$(date +%s)
+# shellcheck disable=SC2029
 while true; do
-    RSYNC_PORT=$(ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$SSH_USER@$PGHOST" \
-                 "cat /tmp/rsyncd.port 2>/dev/null" || true)
+    RSYNC_PORT=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
+                 "cat '$REMOTE_PORT' 2>/dev/null" || true)
     [[ -n "$RSYNC_PORT" ]] && break
     (( $(date +%s) - t_start >= timeout_sec )) && fatal "Failed to retrieve rsyncd port within ${timeout_sec}s"
     sleep 1
@@ -617,8 +646,9 @@ printf '%s' "$BLABEL_B64" | base64 --decode > "$REPLICA_PGDATA/backup_label"
 [[ -n $SPCMAP_B64 ]] && printf '%s' "$SPCMAP_B64" | base64 --decode > "$REPLICA_PGDATA/tablespace_map"
 
 # Copy fresh pg_control produced by pg_backup_stop()
-ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no \
-    "$SSH_USER@$PGHOST" "cat '$PRIMARY_PGDATA/global/pg_control'" \
+# shellcheck disable=SC2029
+ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
+    "cat '$PRIMARY_PGDATA/global/pg_control'" \
     > "$REPLICA_PGDATA/global/pg_control"
 
 log "Backup stopped at LSN $STOP_LSN and control files written"
