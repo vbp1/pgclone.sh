@@ -514,8 +514,7 @@ rm -f "$PSQL_IN" "$PSQL_OUT"
 #   “requested WAL segment ... has already been removed”
 # because the primary could recycle it while the replica never downloaded it.
 # Therefore we determine the exact filename
-# for STOP_LSN, force a WAL switch (pg_switch_wal),
-# and wait until that file shows up in TEMP_WALDIR.
+# for STOP_LSN and wait until that file shows up in TEMP_WALDIR.
 
 STOP_WALFILE=$(
   PGPASSWORD="$PGPASSWORD" \
@@ -524,11 +523,6 @@ STOP_WALFILE=$(
 )
 log "Waiting for WAL file $STOP_WALFILE..."
 
-log "Forcing WAL switch on primary..."  
-PGPASSWORD="$PGPASSWORD" \
-    psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -w -X -A -t \
-    -c "SELECT pg_switch_wal();" >/dev/null 2>&1 || fatal "pg_switch_wal failed"
- 
 t0=$(date +%s)
 timeout=$WAL_WAIT_TIMEOUT
 while [[ ! -f "$TEMP_WALDIR/$STOP_WALFILE" ]]; do
