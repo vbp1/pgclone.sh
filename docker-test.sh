@@ -8,6 +8,12 @@ PRIMARY_CONTAINER=pg-primary
 REPLICA_CONTAINER=pg-replica
 declare -A skip_container=()
 
+# === Generate SSH test key-pair once ===
+if [[ ! -f test-key || ! -f test-key.pub ]]; then
+    echo ">>> Generating SSH key-pair test-key / test-key.pub"
+    ssh-keygen -t rsa -b 2048 -N "" -f test-key -q
+fi
+
 # === Check for existing Docker image ===
 if docker image inspect "$IMAGE" > /dev/null 2>&1; then
     read -r -p "Docker image '$IMAGE' already exists. Rebuild? [y/N] " rebuild
