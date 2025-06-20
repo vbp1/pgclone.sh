@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="0.2.0"
+PGCLONE_VERSION="0.3.0"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -330,45 +330,68 @@ parallel_rsync_module() {
 ### MAIN SCRIPT STARTS HERE ###
 
 # ==== Parse arguments ====
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --pghost) PGHOST="$2"; shift 2 ;;
-        --pgport) PGPORT="$2"; shift 2 ;;
-        --pguser) PGUSER="$2"; shift 2 ;;
-        --primary-pgdata) PRIMARY_PGDATA="$2"; shift 2 ;;
-        --replica-pgdata) REPLICA_PGDATA="$2"; shift 2 ;;
-        --replica-waldir) REPLICA_WALDIR="$2"; shift 2 ;;
-        --ssh-key) SSH_KEY="$2"; shift 2 ;;
-        --ssh-user) SSH_USER="$2"; shift 2 ;;
-        --temp-waldir) TEMP_WALDIR="$2"; shift 2 ;;
-        --parallel) PARALLEL="$2"; shift 2 ;;
-        --rsync-port) RSYNC_PORT="$2"; shift 2 ;;
-        --verbose) VERBOSE=1; shift ;;
-        -v|--version)
-            echo "pgclone version $PGCLONE_VERSION"
-            exit 0
-            ;;
-        -h|--help)
-            echo "Usage: $0 [OPTIONS] ..."
-            echo "  --pghost           Primary host"
-            echo "  --pgport           Primary port"
-            echo "  --pguser           Primary user"
-            echo "  --primary-pgdata   Primary PGDATA path"
-            echo "  --replica-pgdata   Replica PGDATA path"
-            echo "  --replica-waldir   Replica pg_wal path"
-            echo "  --ssh-key          SSH private key file"
-            echo "  --ssh-user         SSH user"
-            echo "  --temp-waldir      Temp WAL dir"
-            echo "  --parallel         Number of parallel rsync jobs"
-            echo "  --rsync-port       Rsync port"
-            echo "  --verbose          Verbose output"
-            echo "  -V, --version      Print version and exit"
-            echo "  -h, --help         Show this help and exit"
-            exit 0
-            ;;
-        *) fatal "Unknown arg: $1" ;;
+print_usage () {
+    cat <<EOF
+Usage: pgclone [OPTIONS]
+
+  --pghost           Primary host
+  --pgport           Primary port (default 5432)
+  --pguser           Primary user
+  --primary-pgdata   Primary PGDATA path
+  --replica-pgdata   Replica PGDATA path
+  --replica-waldir   Replica pg_wal path
+  --ssh-key          SSH private key file
+  --ssh-user         SSH user (login on primary host)
+  --temp-waldir      Temporary WAL directory
+  --parallel         Number of parallel rsync jobs (default 4)
+  --rsync-port       Fixed rsync port on primary
+  --verbose          Verbose output
+  -v, --version      Print version and exit
+  -h, --help         Show this help and exit
+EOF
+}
+
+show_help=0
+show_version=0
+
+# short options: h v V
+# long  options are handled through the leading '-' case in getopts
+while getopts ":hv-:" opt; do
+    case "$opt" in
+        # long options come here as '-'
+        -)
+            case "${OPTARG}" in
+                pghost)            PGHOST="${!OPTIND}";      OPTIND=$((OPTIND+1));;
+                pgport)            PGPORT="${!OPTIND}";      OPTIND=$((OPTIND+1));;
+                pguser)            PGUSER="${!OPTIND}";      OPTIND=$((OPTIND+1));;
+                primary-pgdata)    PRIMARY_PGDATA="${!OPTIND}"; OPTIND=$((OPTIND+1));;
+                replica-pgdata)    REPLICA_PGDATA="${!OPTIND}"; OPTIND=$((OPTIND+1));;
+                replica-waldir)    REPLICA_WALDIR="${!OPTIND}"; OPTIND=$((OPTIND+1));;
+                ssh-key)           SSH_KEY="${!OPTIND}";     OPTIND=$((OPTIND+1));;
+                ssh-user)          SSH_USER="${!OPTIND}";    OPTIND=$((OPTIND+1));;
+                temp-waldir)       TEMP_WALDIR="${!OPTIND}"; OPTIND=$((OPTIND+1));;
+                parallel)          PARALLEL="${!OPTIND}";    OPTIND=$((OPTIND+1));;
+                rsync-port)        RSYNC_PORT="${!OPTIND}";  OPTIND=$((OPTIND+1));;
+                verbose)           VERBOSE=1;;
+                help)              show_help=1;;
+                version)           show_version=1;;
+                *) fatal "Unknown option --${OPTARG}";;
+            esac ;;
+        h) show_help=1 ;;
+        v) show_version=1 ;;
+        \?) fatal "Unknown option -${OPTARG}" ;;
     esac
 done
+shift $((OPTIND-1))
+
+if (( show_version )); then
+    echo "pgclone version $PGCLONE_VERSION"
+    exit 0
+fi
+if (( show_help )); then
+    print_usage
+    exit 0
+fi
 
 # Logging script version
 log "pgclone script version $PGCLONE_VERSION"
