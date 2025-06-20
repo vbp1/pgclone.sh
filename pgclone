@@ -171,14 +171,25 @@ estimate_primary_size_mb() {
     echo $((kb / 1024))
 }
 
-check_replica_disk_space() {
-    local dir="$1"
-    local required="$2"
-    local avail_kb
-    avail_kb=$(df -k "$dir" | awk 'NR==2 {print $4}')
-    local avail_mb=$((avail_kb / 1024))
-    [[ "$avail_mb" -lt "$required" ]] && fatal "Insufficient disk space: ${avail_mb}MB < ${required}MB"
-    log "Disk OK on $dir: ${avail_mb}MB free (need $required)"
+# ---------------------------------------------------------------
+# check_space <assoc-array-name>
+#   <assoc-array-name>[mount_point] = required_kilobytes
+# ---------------------------------------------------------------
+# shellcheck disable=SC2004
+check_space () {
+    local -n need_kb=$1          # bash nameref (>=4.3)
+
+    for mp in "${!need_kb[@]}"; do
+        local avail_kb
+        avail_kb=$(df -P "$mp" | awk 'NR==2{print $4}')
+
+        if (( avail_kb < need_kb[$mp] )); then            # <-- $mp
+            fatal "Insufficient disk space on $mp: $((avail_kb/1024)) MB "\
+                  "< $((need_kb[$mp]/1024)) MB required"  # <-- $mp
+        fi
+        log "Disk OK on $mp: $((avail_kb/1024)) MB free "\
+            "(need $((need_kb[$mp]/1024)) MB)"            # <-- $mp
+    done
 }
 
 # shellcheck disable=SC2029
@@ -199,21 +210,6 @@ discover_tablespaces() {
                  echo \"\$oid|\$tgt|\$sz\"
              done"
     )
-}
-
-check_tablespaces_space() {
-    declare -A need_kb
-    for oid in "${!TBLSPCS[@]}"; do
-        dst="${TBLSPCS_DST[$oid]}"
-        mkdir -p "$dst"
-        fs=$(df -P "$dst" | awk 'NR==2{print $6}')
-        need_kb[$fs]=$(( ${need_kb[$fs]:-0} + ${TBLSPCS_SIZE_KB[$oid]} ))
-    done
-    for fs in "${!need_kb[@]}"; do
-        avail=$(df -P "$fs" | awk 'NR==2{print $4}')
-        [[ $avail -lt ${need_kb[$fs]} ]] && fatal "Insufficient disk space on $fs: need $((need_kb[$fs]/1024))MB"
-        log "Disk OK on $fs: $((avail/1024))MB free (need $((need_kb[$fs]/1024))MB)"
-    done
 }
 
 # Wait until the walreceiver connection shows up in pg_stat_replication
@@ -426,11 +422,24 @@ ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "echo OK" >/dev/null ||
     fatal "SSH test failed"
 
 # ==== Disk space check ====
-primary_size=$(estimate_primary_size_mb)
-required_space=$((primary_size * 1))
-check_replica_disk_space "$REPLICA_PGDATA" "$required_space"
+declare -A fs_need_kb=()  # mount_point -> required_kilobytes
+
+# pgdata
+primary_size_mb=$(estimate_primary_size_mb)
+fs_pgdata=$(df -P "$REPLICA_PGDATA" | awk 'NR==2{print $6}')
+fs_need_kb[$fs_pgdata]=$(( ${fs_need_kb[$fs_pgdata]:-0} + primary_size_mb*1024 ))
+
+# tablespaces
 discover_tablespaces
-check_tablespaces_space
+for oid in "${!TBLSPCS[@]}"; do
+    dst=${TBLSPCS_DST[$oid]}
+    mkdir -p "$dst"
+    mp=$(df -P "$dst" | awk 'NR==2{print $6}')
+    fs_need_kb[$mp]=$(( ${fs_need_kb[$mp]:-0} + ${TBLSPCS_SIZE_KB[$oid]} ))
+done
+
+# check space on replica
+check_space fs_need_kb
 
 # ==== Open persistent psql session ====
 log "Open persistent psql session..."
