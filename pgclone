@@ -8,16 +8,22 @@ set -euo pipefail
 PGCLONE_VERSION="0.2.0"
 
 # ==== Default parameters ====
-PGPORT=5432
-REPLICA_WALDIR=""
-TEMP_WALDIR=""
-PARALLEL=4
-VERBOSE=0
-RSYNCD_PORT_RANGE="45000..45100"
-# timeouts in seconds
-RSYNCD_GET_PORT_TIMEOUT=30
-REPLICATION_START_TIMEOUT=60
-WAL_WAIT_TIMEOUT=60
+PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
+REPLICA_WALDIR=""           # Destination pg_wal directory on the replica;
+                            # empty ⇒ use "$REPLICA_PGDATA/pg_wal"
+TEMP_WALDIR=""              # Temporary directory where pg_receivewal stores incoming WAL;
+                            # empty ⇒ auto-create under /tmp
+PARALLEL=4                  # Number of simultaneous rsync workers for base/tablespace copy
+VERBOSE=0                   # 1 = print detailed progress/debug logs, 0 = quiet
+
+RSYNCD_PORT_RANGE="45000..45100"   # Port range to search for a free TCP port when
+                                   # starting the transient rsync daemon on the primary
+
+# ---- timeouts (seconds) ----
+RSYNCD_GET_PORT_TIMEOUT=30   # Max time to wait for the primary to report the chosen rsyncd port
+REPLICATION_START_TIMEOUT=60 # Wait for pg_receivewal to appear in pg_stat_replication
+PROCESS_TERM_TIMEOUT=60      # Grace period after SIGTERM before a child process is force-killed
+WAL_WAIT_TIMEOUT=60          # How long to wait for the WAL segment containing STOP_LSN to arrive
 
 declare -A TBLSPCS=()          # oid -> src (master)
 declare -A TBLSPCS_SIZE_KB=()  # oid -> size KB
@@ -30,7 +36,6 @@ CLEANUP_DONE=0
 RSYNC_SECRET=""
 RSYNCD_SSH_PID=""
 RSYNCD_WATCHDOG_PID=""
-WATCHDOG_PID=""
 PART_PREFIX=""
 FILELIST_RAW=""
 FILELIST_SORTED=""
@@ -53,32 +58,26 @@ cleanup() {
     if [[ -n "${PG_RECEIVEWAL_PID:-}" ]]; then
         log "Killing pg_receivewal PID=$PG_RECEIVEWAL_PID"
         kill "$PG_RECEIVEWAL_PID" 2>/dev/null || true
-        wait "$PG_RECEIVEWAL_PID" 2>/dev/null || true
+        wait_and_kill_process "$PG_RECEIVEWAL_PID" "pg_receivewal"
     fi
 
     # Stop pg_receivewal watchdog
     if [[ -n "${PG_RECEIVEWAL_WATCHDOG_PID:-}" ]]; then
         kill "$PG_RECEIVEWAL_WATCHDOG_PID" 2>/dev/null || true
-        wait "$PG_RECEIVEWAL_WATCHDOG_PID" 2>/dev/null || true
+        wait_and_kill_process "$PG_RECEIVEWAL_WATCHDOG_PID" "pg_receivewal watchdog"
     fi
 
     # Stop rsyncd on master via ssh PID
     if [[ -n "${RSYNCD_SSH_PID:-}" ]]; then
         log "Stopping rsyncd (via SSH PID=$RSYNCD_SSH_PID)..."
         kill "$RSYNCD_SSH_PID" 2>/dev/null || true
-        wait "$RSYNCD_SSH_PID" 2>/dev/null || true
+        wait_and_kill_process "$RSYNCD_SSH_PID" "rsyncd ssh session"
     fi
 
     # Stop rsyncd watchdog
     if [[ -n "${RSYNCD_WATCHDOG_PID:-}" ]]; then
         kill "$RSYNCD_WATCHDOG_PID" 2>/dev/null || true
-        wait "$RSYNCD_WATCHDOG_PID" 2>/dev/null || true
-    fi
-
-    # Stop watchdog
-    if [[ -n "${WATCHDOG_PID:-}" ]]; then
-        kill "$WATCHDOG_PID" 2>/dev/null || true
-        wait "$WATCHDOG_PID" 2>/dev/null || true
+        wait_and_kill_process "$RSYNCD_WATCHDOG_PID" "rsyncd watchdog"
     fi
 
     # Cleanup temp files created for --files-from
@@ -111,6 +110,49 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ==== Helpers ====
+wait_and_kill_process() {
+    process_pid="$1"
+    process_name="$2"
+    t0=$(date +%s)
+    while kill -0 "$process_pid" 2>/dev/null; do
+        (( $(date +%s) - t0 > PROCESS_TERM_TIMEOUT )) && {
+            log "$process_name did not exit in $PROCESS_TERM_TIMEOUT seconds, trying to kill it..."
+            kill -9 "$process_pid" 2>/dev/null || true
+            break
+        }
+        sleep 1
+    done
+    # Final wait to reap the process, if it's our child
+    wait "$process_pid" 2>/dev/null || true
+}
+
+watchdog_terminate () {
+    local pid="$1"           # PID of the process to terminate
+    local name="$2"          # Human-readable name for logging
+
+    local t0
+
+    # If PID is empty or the process is already gone — nothing to do
+    [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]] && return 0
+    kill -0 "$pid" 2>/dev/null || return 0
+
+    # Attempt a graceful shutdown
+    kill -TERM "$pid" 2>/dev/null || return 0
+ 
+    t0=$(date +%s)
+    while kill -0 "$pid" 2>/dev/null; do
+        (( $(date +%s) - t0 >= PROCESS_TERM_TIMEOUT )) && {
+            log "[watchdog] $name (PID=$pid) did not exit within ${PROCESS_TERM_TIMEOUT}s — sending SIGKILL"
+            kill -KILL "$pid" 2>/dev/null || true
+            break
+        }
+        sleep 1
+    done
+
+    # Reap the child to avoid a zombie, if it really is our child
+    wait "$pid" 2>/dev/null || true
+}
+
 validate_lsn_format() {
     [[ "$1" =~ ^[0-9A-F]+/[0-9A-F]+$ ]] || fatal "Invalid LSN format: $1"
 }
@@ -174,11 +216,33 @@ check_tablespaces_space() {
     done
 }
 
+# Wait until the walreceiver connection shows up in pg_stat_replication
+wait_for_replication_start() {
+    local appname t0 timeout
+    appname="$1" 
+    timeout=$REPLICATION_START_TIMEOUT
+    t0=$(date +%s)
+    log "Waiting for WAL stream to appear in pg_stat_replication (timeout=${timeout}s)..."
+    while (( $(date +%s) - t0 < timeout )); do
+        # Ensure pg_receivewal is still alive
+        kill -0 "$PG_RECEIVEWAL_PID" 2>/dev/null \
+            || fatal "pg_receivewal exited"
+
+        # Check pg_stat_replication for our application_name
+        psql_send "SELECT 1 FROM pg_stat_replication WHERE application_name='$appname' LIMIT 1;"
+        if [[ $(psql_wait | tr -d '[:space:]') == "1" ]]; then
+            log "WAL streaming is active, continuing..."
+            return 0
+        fi
+        sleep 1
+    done
+    fatal "Timeout ${timeout}s: WAL streaming did not start"
+}
+
 # $1 = rsync-module, $2 = dst
 parallel_rsync_module() {
     local module="$1" dst="$2"
     local part_prefix file_raw file_sorted
-    local -a RSYNC_LOGFILES=()
 
     # preparing list of files to copy
     part_prefix=$(mktemp -u -t pgclone_part_"${module}".XXXX)
@@ -262,6 +326,9 @@ parallel_rsync_module() {
     # Cleanup temporary files
     for f in "${RSYNC_LOGFILES[@]}"; do rm -f "$f"; done
     rm -f "$file_raw" "$file_sorted" "${part_prefix}"*
+
+    # Clear the logfiles array for the next run
+    RSYNC_LOGFILES=() 
 }
 
 ### MAIN SCRIPT STARTS HERE ###
@@ -329,11 +396,8 @@ mkdir -p "$REPLICA_PGDATA" "$REPLICA_WALDIR" "$TEMP_WALDIR"
 
 SSH_OPTS=("-i" "$SSH_KEY" "-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=no")
 
-discover_tablespaces
-check_tablespaces_space
-
 # ==== Check tools ====
-for t in ssh psql pg_receivewal rsync find du split awk sha256sum od; do
+for t in ssh psql pg_ctl pg_receivewal rsync find du split awk sha256sum od; do
     command -v "$t" >/dev/null || fatal "$t not found"
 done
 
@@ -351,7 +415,7 @@ if [[ -f "$PIDFILE" ]]; then
     pid=$(head -n1 "$PIDFILE" | tr -d '[:space:]')
     if [[ "$pid" =~ ^[0-9]+$ ]]; then
         # Check if the process is still running and is a PostgreSQL process
-        if ps -p "$pid" -o comm= | grep -qw postgres; then
+        if pg_ctl -D "$REPLICA_PGDATA" status >/dev/null 2>&1; then
             fatal "PostgreSQL appears to be running in $REPLICA_PGDATA (PID $pid). Stop it before proceeding."
         fi
     fi
@@ -365,6 +429,8 @@ ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "echo OK" >/dev/null ||
 primary_size=$(estimate_primary_size_mb)
 required_space=$((primary_size * 1))
 check_replica_disk_space "$REPLICA_PGDATA" "$required_space"
+discover_tablespaces
+check_tablespaces_space
 
 # ==== Open persistent psql session ====
 log "Open persistent psql session..."
@@ -403,35 +469,14 @@ kill -0 "$PG_RECEIVEWAL_PID" 2>/dev/null || fatal "pg_receivewal failed"
 
 # ==== Watchdog for pg_receivewal ====
 (
-    main_pid=$$
-    while kill -0 "$main_pid" 2>/dev/null; do sleep 1; done
-    log "[watchdog] Main process $main_pid died, killing pg_receivewal PID $PG_RECEIVEWAL_PID"
-    kill "$PG_RECEIVEWAL_PID" 2>/dev/null
-) &
-PG_RECEIVEWAL_WATCHDOG_PID=$!
-
-# Wait until the walreceiver connection shows up in pg_stat_replication
-wait_for_replication_start() {
-    local appname t0 timeout
-    appname="$1" 
-    timeout=$REPLICATION_START_TIMEOUT
-    t0=$(date +%s)
-    log "Waiting for WAL stream to appear in pg_stat_replication (timeout=${timeout}s)..."
-    while (( $(date +%s) - t0 < timeout )); do
-        # Ensure pg_receivewal is still alive
-        kill -0 "$PG_RECEIVEWAL_PID" 2>/dev/null \
-            || fatal "pg_receivewal exited"
-
-        # Check pg_stat_replication for our application_name
-        psql_send "SELECT 1 FROM pg_stat_replication WHERE application_name='$appname' LIMIT 1;"
-        if [[ $(psql_wait | tr -d '[:space:]') == "1" ]]; then
-            log "WAL streaming is active, continuing..."
-            return 0
-        fi
+    main_pid=$PPID                     # actual PID of the main script
+    while kill -0 "$main_pid" 2>/dev/null; do
         sleep 1
     done
-    fatal "Timeout ${timeout}s: WAL streaming did not start"
-}
+    log "[watchdog] Main process $main_pid died -> terminating pg_receivewal PID=$PG_RECEIVEWAL_PID"
+    watchdog_terminate "$PG_RECEIVEWAL_PID" "pg_receivewal"
+) &
+PG_RECEIVEWAL_WATCHDOG_PID=$!
 
 wait_for_replication_start "$PG_RCV_APPNAME"
 
@@ -492,7 +537,7 @@ for oid in "${!TBLSPCS[@]}"; do
     path = ${TBLSPCS[$oid]}
     read only = yes
     auth users = replica
-    secrets file = /tmp/rsyncd.secrets
+    secrets file = $REMOTE_SECR
 EOF
 )
 done
@@ -549,7 +594,18 @@ wait
 REMOTE_RS
 RSYNCD_SSH_PID=$!
 
-# get rsyncd port from remote
+# Watchdog: if main process dies, kill ssh (which stops rsyncd)
+(
+    main_pid=$PPID
+    while kill -0 "$main_pid" 2>/dev/null; do
+        sleep 1
+    done
+    log "[watchdog] Main process $main_pid died ⇒ terminating rsyncd-ssh PID=$RSYNCD_SSH_PID"
+    watchdog_terminate "$RSYNCD_SSH_PID" "rsyncd ssh session"
+) &
+RSYNCD_WATCHDOG_PID=$!
+
+# Get rsyncd port from remote
 timeout_sec=$RSYNCD_GET_PORT_TIMEOUT
 t_start=$(date +%s)
 # shellcheck disable=SC2029
@@ -563,17 +619,6 @@ done
 
 [[ -z "$RSYNC_PORT" ]] && fatal "Failed to retrieve rsyncd port"
 log "Using rsync port $RSYNC_PORT"
-
-# Watchdog: if main process dies, kill ssh (which stops rsyncd)
-(
-    main_pid=$$
-    while kill -0 "$main_pid" 2>/dev/null; do sleep 1; done
-    log "[watchdog] Main process $main_pid died, killing rsyncd SSH PID $RSYNCD_SSH_PID"
-    kill "$RSYNCD_SSH_PID" 2>/dev/null
-) &
-RSYNCD_WATCHDOG_PID=$!
-
-sleep 2
 
 # Setup rsync log arguments
 rsync_log_args=()
@@ -619,7 +664,7 @@ for d in pg_replslot pg_dynshmem pg_notify pg_serial pg_snapshots pg_stat_tmp pg
     mkdir -p "$REPLICA_PGDATA/$d"
 done
 
-# Ensure empty pg_wal directory exists
+# Ensure empty pg_wal directory exists as a pgdata subdir
 if [[ "${REPLICA_WALDIR%/}" != "${REPLICA_PGDATA%/}/pg_wal" ]]; then
     # If pg_wal is a separate directory, create a symlink in the pgdata directory
     ln -s -f "$REPLICA_WALDIR" "$REPLICA_PGDATA/pg_wal"
@@ -655,7 +700,7 @@ log "Backup stopped at LSN $STOP_LSN and control files written"
 
 log "Closing persistent psql session..."
 psql_send '\q'
-wait "$PSQL_PID"
+wait_and_kill_process "$PSQL_PID" "persistent psql session"
 rm -f "$PSQL_IN" "$PSQL_OUT"
 
 # We must be certain the WAL segment that contains STOP_LSN is present on the replica
@@ -682,19 +727,36 @@ done
 log "WAL $STOP_WALFILE received"
 
 # ==== Stop pg_receivewal ====
+# We should stop pg_receivewal explicitly here, because we need stable files in TEMP_WALDIR
+# before we move them to the final WAL directory.
 log "Stopping pg_receivewal..."
 if kill -0 "$PG_RECEIVEWAL_PID" 2>/dev/null; then
-    kill -TERM "$PG_RECEIVEWAL_PID"
-    wait "$PG_RECEIVEWAL_PID" || true
+    kill -TERM "$PG_RECEIVEWAL_PID" 2>/dev/null
+    wait_and_kill_process "$PG_RECEIVEWAL_PID" "pg_receivewal"
+    kill -TERM "$PG_RECEIVEWAL_WATCHDOG_PID" 2>/dev/null
+    wait_and_kill_process "$PG_RECEIVEWAL_WATCHDOG_PID" "pg_receivewal watchdog"
 fi
+# We stops pg_receivewal and its watchdog here, so we should not do it on cleanup.
+PG_RECEIVEWAL_PID=""
+PG_RECEIVEWAL_WATCHDOG_PID=""
 
 # ==== Move WAL files ====
 log "Moving WAL to $REPLICA_WALDIR..."
 find "$TEMP_WALDIR" -type f -exec mv -f {} "$REPLICA_WALDIR/" \;
 find "$TEMP_WALDIR" -mindepth 1 -delete
 
-log "Renaming partial WAL files..."
-find "$REPLICA_WALDIR" -type f -name '*.partial' -exec bash -c 'for f; do mv "$f" "${f%.partial}"; done' _ {} +
+# Find the lexicographically last *.partial in REPLICA_WALDIR and remove the .partial suffix.
+# This is needed to handle the case when pg_receivewal was interrupted
+# while writing a WAL segment, leaving a file with .partial suffix.
+last_partial=$(find "$REPLICA_WALDIR" -maxdepth 1 -type f -name '*.partial' \
+                   -printf '%P\n' | sort | tail -n1)
+
+if [[ -n "$last_partial" ]]; then
+    mv -f "$REPLICA_WALDIR/$last_partial" \
+          "$REPLICA_WALDIR/${last_partial%.partial}"
+    log "Partial WAL segment renamed: $last_partial → ${last_partial%.partial}"
+fi
+
 
 # ==== Final checks ====
 for f in PG_VERSION postgresql.conf pg_hba.conf; do
@@ -703,7 +765,7 @@ done
 wal_count=$(find "$REPLICA_WALDIR" -type f -name '[0-9A-F]*' | wc -l)
 [[ "$wal_count" -gt 0 ]] || fatal "No WAL files in $REPLICA_WALDIR, see pg_walreceiver log $REPLICA_WALDIR/pg_receivewal.log"
 rm -f "$REPLICA_WALDIR/pg_receivewal.log"
-log "Found $wal_count WAL files"
+log "Found $wal_count WAL files in $REPLICA_WALDIR"
 
 chmod 700 "$REPLICA_PGDATA" "$REPLICA_WALDIR" || log "chmod failed"
 
