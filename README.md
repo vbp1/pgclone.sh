@@ -92,3 +92,32 @@ This will:
 > After the test, you can remove the containers interactively.
 
 ---
+### Quick Algorithm Overview
+
+1. **Stream WAL Ahead of Time**
+   *Purpose: keep the replica continuously fed with WAL so the later file-level copy is self-consistent and no segment is lost.*
+
+   * Creates a temporary WAL directory and starts `pg_receivewal` (no slot, unique `application_name`).
+   * Waits until the receiver appears in `pg_stat_replication`; a watchdog tears it down if the main script dies.
+
+2. **Initiate Online Backup**
+   *Purpose: freeze a transaction-consistent snapshot on the primary while it stays fully writable.*
+
+   * Calls `pg_backup_start('pgclone', true)` to capture **START LSN**.
+   * Launches a throw-away `rsync` daemon on the primary (random port, one-time secret) and performs an initial copy of everything except `base/`, `pg_wal/`, and transient directories.
+
+3. **Parallel Data Transfer**
+   *Purpose: move the bulk of the data as fast as possible, minimising total clone time.*
+
+   * `base/` and every tablespace are copied by the custom `parallel_rsync_module`.
+   * Files are size-sorted and distributed among *N* workers with a lightweight ring-hop balancer; each worker runs `rsync --files-from` concurrently.
+
+4. **Stop Backup & Finalise Files**
+   *Purpose: seal the snapshot and guarantee the replica has every WAL record needed to recover.*
+
+   * Executes `pg_backup_stop(true)` → **STOP LSN**, `backup_label`, optional `tablespace_map`; fetches a fresh `pg_control`.
+   * Waits until the WAL segment containing the STOP LSN is fully received, then stops `pg_receivewal`.
+   * Moves WAL files to the final `pg_wal`, renames any `.partial`, recreates empty runtime directories, and sets secure permissions.
+
+> **Result:** A ready-to-start physical replica seeded while the primary stayed online, with live WAL streaming, parallel file copy, and built-in fault-tolerance.
+
