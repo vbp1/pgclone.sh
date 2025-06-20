@@ -356,30 +356,64 @@ show_version=0
 
 # short options: h v V
 # long  options are handled through the leading '-' case in getopts
-while getopts ":hv-:" opt; do
+while getopts ':hv-:' opt; do
     case "$opt" in
-        # long options come here as '-'
-        -)
-            case "${OPTARG}" in
-                pghost)            PGHOST="${!OPTIND}";      OPTIND=$((OPTIND+1));;
-                pgport)            PGPORT="${!OPTIND}";      OPTIND=$((OPTIND+1));;
-                pguser)            PGUSER="${!OPTIND}";      OPTIND=$((OPTIND+1));;
-                primary-pgdata)    PRIMARY_PGDATA="${!OPTIND}"; OPTIND=$((OPTIND+1));;
-                replica-pgdata)    REPLICA_PGDATA="${!OPTIND}"; OPTIND=$((OPTIND+1));;
-                replica-waldir)    REPLICA_WALDIR="${!OPTIND}"; OPTIND=$((OPTIND+1));;
-                ssh-key)           SSH_KEY="${!OPTIND}";     OPTIND=$((OPTIND+1));;
-                ssh-user)          SSH_USER="${!OPTIND}";    OPTIND=$((OPTIND+1));;
-                temp-waldir)       TEMP_WALDIR="${!OPTIND}"; OPTIND=$((OPTIND+1));;
-                parallel)          PARALLEL="${!OPTIND}";    OPTIND=$((OPTIND+1));;
-                rsync-port)        RSYNC_PORT="${!OPTIND}";  OPTIND=$((OPTIND+1));;
-                verbose)           VERBOSE=1;;
-                help)              show_help=1;;
-                version)           show_version=1;;
-                *) fatal "Unknown option --${OPTARG}";;
-            esac ;;
-        h) show_help=1 ;;
+        -)  # long option: --foo or --foo=bar
+            long="${OPTARG}"
+            if [[ $long == *=* ]]; then
+                val="${long#*=}"
+                long="${long%%=*}"
+                have_val=1
+            else
+                val=""
+                have_val=0
+            fi
+
+            needs_arg=1
+            case "$long" in
+                verbose)   VERBOSE=1;               needs_arg=0 ;;
+                help)      show_help=1;             needs_arg=0 ;;
+                version)   show_version=1;          needs_arg=0 ;;
+                pghost)           ;;
+                pgport)           ;;
+                pguser)           ;;
+                primary-pgdata)   ;;
+                replica-pgdata)   ;;
+                replica-waldir)   ;;
+                ssh-key)          ;;
+                ssh-user)         ;;
+                temp-waldir)      ;;
+                parallel)         ;;
+                rsync-port)       ;;
+                *) fatal "Unknown option --$long" ;;
+            esac
+
+            # if the option requires an argument, check if we have it
+            if (( needs_arg && ! have_val )); then
+                val="${!OPTIND-}"
+                if [[ -z $val || $val == -* ]]; then
+                    fatal "Option --$long requires a value"
+                fi
+                OPTIND=$((OPTIND+1))
+            fi
+
+            case "$long" in
+                pghost)           PGHOST="$val" ;;
+                pgport)           PGPORT="$val" ;;
+                pguser)           PGUSER="$val" ;;
+                primary-pgdata)   PRIMARY_PGDATA="$val" ;;
+                replica-pgdata)   REPLICA_PGDATA="$val" ;;
+                replica-waldir)   REPLICA_WALDIR="$val" ;;
+                ssh-key)          SSH_KEY="$val" ;;
+                ssh-user)         SSH_USER="$val" ;;
+                temp-waldir)      TEMP_WALDIR="$val" ;;
+                parallel)         PARALLEL="$val" ;;
+                rsync-port)       RSYNC_PORT="$val" ;;
+            esac
+            ;;
+        h) show_help=1    ;;
         v) show_version=1 ;;
-        \?) fatal "Unknown option -${OPTARG}" ;;
+        \?) fatal "Unknown option -$OPTARG" ;;
     esac
 done
 shift $((OPTIND-1))
