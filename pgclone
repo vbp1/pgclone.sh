@@ -832,9 +832,8 @@ last_partial=$(find "$REPLICA_WALDIR" -maxdepth 1 -type f -name '*.partial' \
 if [[ -n "$last_partial" ]]; then
     mv -f "$REPLICA_WALDIR/$last_partial" \
           "$REPLICA_WALDIR/${last_partial%.partial}"
-    log "Partial WAL segment renamed: $last_partial → ${last_partial%.partial}"
+    log "Partial WAL segment renamed: $last_partial -> ${last_partial%.partial}"
 fi
-
 
 # ==== Final checks ====
 for f in PG_VERSION postgresql.conf pg_hba.conf; do
