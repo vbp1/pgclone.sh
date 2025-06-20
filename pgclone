@@ -110,6 +110,13 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ==== Helpers ====
+
+# Safe shell quoting for remote commands
+shquote() {
+    # printf %q даёт POSIX-совместимую экранированную строку
+    printf '%q' "$1"
+}
+
 wait_and_kill_process() {
     process_pid="$1"
     process_name="$2"
@@ -165,8 +172,11 @@ validate_ssh_key() {
 estimate_primary_size_mb() {
     log "Estimating primary data size..."
     local kb
+    # shell-quote PGDATA before passing to the remote shell
     # shellcheck disable=SC2029
-    kb=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "du -sk '$PRIMARY_PGDATA'" | awk '{print $1}')
+    kb=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
+             "du -sk $(shquote "$PRIMARY_PGDATA")" |
+         awk '{print $1}')
     [[ "$kb" =~ ^[0-9]+$ ]] || fatal "du failed on primary"
     echo $((kb / 1024))
 }
@@ -194,15 +204,17 @@ check_space () {
 
 # shellcheck disable=SC2029
 discover_tablespaces() {
+    local pgdata_q
+    pgdata_q=$(shquote "$PRIMARY_PGDATA")
+
     while IFS='|' read -r oid src size; do
         [[ -z $oid || -z $src ]] && continue
         TBLSPCS[$oid]="$src"
         TBLSPCS_SIZE_KB[$oid]="$size"
         TBLSPCS_DST[$oid]="$src"
     done < <(
-        ssh "${SSH_OPTS[@]}" \
-            "$SSH_USER@$PGHOST" \
-            "for l in '$PRIMARY_PGDATA'/pg_tblspc/*; do
+        ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
+            "for l in ${pgdata_q}/pg_tblspc/*; do
                  [ -L \"\$l\" ] || continue
                  oid=\$(basename \"\$l\")
                  tgt=\$(readlink -f \"\$l\")
@@ -759,7 +771,7 @@ printf '%s' "$BLABEL_B64" | base64 --decode > "$REPLICA_PGDATA/backup_label"
 # Copy fresh pg_control produced by pg_backup_stop()
 # shellcheck disable=SC2029
 ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
-    "cat '$PRIMARY_PGDATA/global/pg_control'" \
+    "cat $(shquote "$PRIMARY_PGDATA")/global/pg_control" \
     > "$REPLICA_PGDATA/global/pg_control"
 
 log "Backup stopped at LSN $STOP_LSN and control files written"
