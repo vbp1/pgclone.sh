@@ -1,3 +1,7 @@
 # local test SSH keys
 test-key
 test-key.pub
+# temporary files created by bats
+.bats-tmp/
+*.log
+*.tmp
