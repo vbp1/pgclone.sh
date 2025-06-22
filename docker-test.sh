@@ -66,7 +66,7 @@ if [[ -z "${skip_container[$REPLICA_CONTAINER]:-}" ]]; then
       --network "$NETWORK" \
       -e POSTGRES_PASSWORD=postgres \
       -e ROLE=replica \
-      -v "$PWD/test-key":/root/.ssh/id_rsa:ro \
+      -v "$PWD/test-key":/id_rsa:ro \
       -v "$PWD/pgclone":/usr/bin/pgclone:ro \
       "$IMAGE"
 fi
@@ -74,7 +74,7 @@ fi
 sleep 5
 
 echo ">>> Running pgclone inside replica..."
-docker exec "$REPLICA_CONTAINER" bash -c '
+docker exec -u postgres "$REPLICA_CONTAINER" bash -c '
   export PGPASSWORD=postgres && \
   pgclone \
     --pghost pg-primary \
@@ -84,17 +84,15 @@ docker exec "$REPLICA_CONTAINER" bash -c '
     --replica-pgdata /var/lib/postgresql/data \
     --replica-waldir /var/lib/postgresql/data/pg_wal \
     --temp-waldir /tmp/pg_wal \
-    --ssh-key /root/.ssh/id_rsa \
-    --ssh-user root \
+    --ssh-key /tmp/id_rsa \
+    --ssh-user postgres \
     --parallel 4 \
     --verbose'
 
 echo ">>> Done. Checking replica PG_VERSION..."
 docker exec "$REPLICA_CONTAINER" cat /var/lib/postgresql/data/PG_VERSION
 
-echo ">>> Configuring and running replica..."
-docker exec "$REPLICA_CONTAINER" bash -c '
-    chown -R postgres:postgres /var/lib/postgresql/data/'
+echo ">>> Running replica..."
 docker exec -u postgres "$REPLICA_CONTAINER" bash -c "
     echo \"primary_conninfo = 'host=pg-primary port=5432 user=postgres \
     password=postgres sslmode=prefer \

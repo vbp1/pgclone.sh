@@ -1,4 +1,5 @@
-FROM postgres:15
+ARG PG_MAJOR=15
+FROM postgres:${PG_MAJOR}
 
 RUN apt-get update && apt-get install -y rsync openssh-server && \
     mkdir -p /run/sshd /root/.ssh
@@ -12,13 +13,14 @@ CMD ["bash", "-c", "\
   service ssh start && \
   if [[ \"$ROLE\" == \"primary\" ]]; then \
     rm -rf /var/lib/postgresql/data/* && \
-    mkdir -p /root/.ssh && \
-    cp /tmp/test-key.pub /root/.ssh/authorized_keys && \
-    chown root:root /root/.ssh/authorized_keys && \
-    chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && \
+    chmod 700 /var/lib/postgresql && \
     echo '[primary] Starting PostgreSQL...'; \
     exec docker-entrypoint.sh postgres; \
   else \
     echo '[replica] PostgreSQL is disabled, waiting...'; \
+    cp /id_rsa /tmp/id_rsa && \
+    chown postgres:postgres /tmp/id_rsa && \
+    chmod 0600 /tmp/id_rsa && \
+    chown postgres:postgres /tmp/id_rsa && \
     tail -f /dev/null; \
   fi"]
