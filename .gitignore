@@ -1,6 +1,11 @@
 # local test SSH keys
 test-key
 test-key.pub
+wrong-key
+wrong-key.pub
+# bats test helper files
+tests/test_helper/*
+!tests/test_helper/.gitkeep
 # temporary files created by bats
 .bats-tmp/
 *.log

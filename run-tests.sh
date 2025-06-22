@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export RUN_ID="pgclone-$(date +%s%N)"
+
+cleanup_all() {
+  docker rm -f $(docker ps -aq --filter "label=pgclone-test-run=$RUN_ID") 2>/dev/null || true
+}
+
+trap cleanup_all EXIT
+
 # 1) убедимся, что есть ключи ssh
 [[ -f test-key && -f test-key.pub ]] || ssh-keygen -t rsa -b 2048 -N "" -f test-key -q
 
