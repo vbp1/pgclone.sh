@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="0.3.0"
+PGCLONE_VERSION="0.3.1"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -459,6 +459,11 @@ mkdir -p "$REPLICA_PGDATA" "$REPLICA_WALDIR" "$TEMP_WALDIR"
 
 SSH_OPTS=("-i" "$SSH_KEY" "-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=no")
 
+# ==== Check that we are not running as root ====
+if [[ "$(id -u)" -eq 0 ]]; then
+  fatal "This script must not be run as root"
+fi
+
 # ==== Check tools ====
 for t in ssh psql pg_ctl pg_receivewal rsync find du split awk sha256sum od; do
     command -v "$t" >/dev/null || fatal "$t not found"
@@ -473,15 +478,8 @@ flock -n 200 || fatal "Another pgclone is running for $REPLICA_PGDATA_ABS (lock:
 
 # ==== Check that Postgres is NOT running on target replica PGDATA ====
 log "Checking if PostgreSQL is not running in $REPLICA_PGDATA..."
-PIDFILE="$REPLICA_PGDATA/postmaster.pid"
-if [[ -f "$PIDFILE" ]]; then
-    pid=$(head -n1 "$PIDFILE" | tr -d '[:space:]')
-    if [[ "$pid" =~ ^[0-9]+$ ]]; then
-        # Check if the process is still running and is a PostgreSQL process
-        if pg_ctl -D "$REPLICA_PGDATA" status >/dev/null 2>&1; then
-            fatal "PostgreSQL appears to be running in $REPLICA_PGDATA (PID $pid). Stop it before proceeding."
-        fi
-    fi
+if pg_ctl -D "$REPLICA_PGDATA" status >/dev/null 2>&1; then
+    fatal "PostgreSQL appears to be running in $REPLICA_PGDATA (PID $pid). Stop it before proceeding."
 fi
 
 # ==== Check SSH connection ====
@@ -578,6 +576,9 @@ REMOTE_CONF="$REMOTE_DIR/rsyncd.conf"
 REMOTE_SECR="$REMOTE_DIR/rsyncd.secrets"
 REMOTE_PID="$REMOTE_DIR/rsyncd.pid"
 REMOTE_PORT="$REMOTE_DIR/rsyncd.port"
+# this lock is used to ensure that only one rsyncd instance is running
+# for the same PGDATA at a time
+# it is not rsync's lock (determined by lock file parameter in rsyncd.conf)
 REMOTE_LOCK="$REMOTE_DIR/lock"
 
 
@@ -585,12 +586,11 @@ tbl_cnt=${#TBLSPCS[@]}            # 0, if array is empty
 max_conn=$(( PARALLEL * (tbl_cnt + 2) ))
 
 RSYNCD_CONF=$(cat <<EOF
-uid = postgres
-gid = postgres
 use chroot = no
 max connections = $max_conn
 pid file = $REMOTE_PID
 log file = $REMOTE_DIR/rsyncd.log
+lock file = $REMOTE_DIR/rsyncd.lock
 
 [pgdata]
     path = $PRIMARY_PGDATA
