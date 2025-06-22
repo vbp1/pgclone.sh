@@ -212,6 +212,7 @@ discover_tablespaces() {
         TBLSPCS[$oid]="$src"
         TBLSPCS_SIZE_KB[$oid]="$size"
         TBLSPCS_DST[$oid]="$src"
+        log "Discovered tablespace: OID=$oid, src=$src, size=${size}KB"
     done < <(
         ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
             "for l in ${pgdata_q}/pg_tblspc/*; do
@@ -356,7 +357,6 @@ Usage: pgclone [OPTIONS]
   --ssh-user         SSH user (login on primary host)
   --temp-waldir      Temporary WAL directory
   --parallel         Number of parallel rsync jobs (default 4)
-  --rsync-port       Fixed rsync port on primary
   --verbose          Verbose output
   -v, --version      Print version and exit
   -h, --help         Show this help and exit
@@ -396,7 +396,6 @@ while getopts ':hv-:' opt; do
                 ssh-user)         ;;
                 temp-waldir)      ;;
                 parallel)         ;;
-                rsync-port)       ;;
                 *) fatal "Unknown option --$long" ;;
             esac
 
@@ -420,7 +419,6 @@ while getopts ':hv-:' opt; do
                 ssh-user)         SSH_USER="$val" ;;
                 temp-waldir)      TEMP_WALDIR="$val" ;;
                 parallel)         PARALLEL="$val" ;;
-                rsync-port)       RSYNC_PORT="$val" ;;
             esac
             ;;
         h) show_help=1    ;;
@@ -610,14 +608,15 @@ EOF
 
 # add sections for tablespaces (if any)
 for oid in "${!TBLSPCS[@]}"; do
-    RSYNCD_CONF+=$(cat <<EOF
+    RSYNCD_CONF+="
 [spc_$oid]
     path = ${TBLSPCS[$oid]}
     read only = yes
     auth users = replica
     secrets file = $REMOTE_SECR
-EOF
-)
+
+"
+    log "Added tablespace OID=$oid to rsyncd config"
 done
 
 # shellcheck disable=SC2029
@@ -731,6 +730,7 @@ log "Base synced"
 
 log "Parallel rsync of tablespaces..."
 for oid in "${!TBLSPCS[@]}"; do
+    log "Syncing tablespace OID=$oid (${TBLSPCS[$oid]})..."
     parallel_rsync_module "spc_$oid" "${TBLSPCS_DST[$oid]}"
 done
 log "Tablespaces synced"
@@ -751,7 +751,6 @@ else
     mkdir -p "$REPLICA_PGDATA/pg_wal"
 fi
 
-log "Parallel sync of base files complete"
 log "Parallel rsync done"
 
 # ==== Stop backup ====
