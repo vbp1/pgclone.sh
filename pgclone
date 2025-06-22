@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="0.3.1"
+PGCLONE_VERSION="0.3.2"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -477,9 +477,15 @@ exec 200>"$LOCK_FILE"
 flock -n 200 || fatal "Another pgclone is running for $REPLICA_PGDATA_ABS (lock: $LOCK_FILE)"
 
 # ==== Check that Postgres is NOT running on target replica PGDATA ====
-log "Checking if PostgreSQL is not running in $REPLICA_PGDATA..."
-if pg_ctl -D "$REPLICA_PGDATA" status >/dev/null 2>&1; then
-    fatal "PostgreSQL appears to be running in $REPLICA_PGDATA (PID $pid). Stop it before proceeding."
+PIDFILE="$REPLICA_PGDATA/postmaster.pid"
+if [[ -f "$PIDFILE" ]]; then
+    pid=$(head -n1 "$PIDFILE" | tr -d '[:space:]')
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+        # Check if the process is still running and is a PostgreSQL process
+        if pg_ctl -D "$REPLICA_PGDATA" status >/dev/null 2>&1; then
+            fatal "PostgreSQL appears to be running in $REPLICA_PGDATA (PID $pid). Stop it before proceeding."
+        fi
+    fi
 fi
 
 # ==== Check SSH connection ====
