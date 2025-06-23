@@ -100,7 +100,7 @@ start_replication() {
 }
 
 stop_cluster() {
-  docker rm -f "${_TEST_CONTAINERS[@]}" &>/dev/null || true
+  docker rm -f --volumes "${_TEST_CONTAINERS[@]}" &>/dev/null || true
   _TEST_CONTAINERS=()
 }
 

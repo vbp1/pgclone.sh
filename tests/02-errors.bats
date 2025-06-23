@@ -123,3 +123,38 @@ build_image 15   # reuse PG15 for all error tests
   assert_failure
   assert_output --partial "PostgreSQL appears to be running"
 }
+
+#
+# B-6 – run pgclone from user root
+#
+@test "fails when pgclone run from user root" {
+  start_replica 15
+  run docker exec -u root "$REPLICA" bash -c "export PGPASSWORD=postgres; \
+    pgclone --pghost pg-primary --pguser postgres \
+      --primary-pgdata /var/lib/postgresql/data \
+      --replica-pgdata /var/lib/postgresql/data \
+      --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --verbose"
+  assert_failure
+  assert_output --partial "This script must not be run as root"
+}
+
+#
+# B-7 – fails when permission denied for function pg_backup_start 
+#
+@test "fails when permission denied for function pg_backup_start" {
+  start_primary 15
+  start_replica 15
+  docker exec -u postgres "$PRIMARY" bash -c "export PGPASSWORD=postgres; \
+    psql -U postgres -h 127.0.0.1 -c \"CREATE USER test WITH PASSWORD 'password';\"; \
+    psql -U postgres -h 127.0.0.1 -c \"ALTER ROLE test WITH REPLICATION;\""
+  run docker exec -u postgres "$REPLICA" bash -c "export PGPASSWORD=password; \
+    export PGDATABASE=postgres; \
+    pgclone --pghost pg-primary --pguser test \
+      --primary-pgdata /var/lib/postgresql/data \
+      --replica-pgdata /var/lib/postgresql/data \
+      --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --verbose"
+  assert_failure
+  assert_output --partial "permission denied for function pg_backup_start"
+}
