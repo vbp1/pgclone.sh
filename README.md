@@ -41,6 +41,10 @@
 
 ```bash
 export PGPASSWORD=your_pg_password
+# optional
+export PGDATABASE=dbname
+# ... some PG... environment variables 
+# see https://www.postgresql.org/docs/current/libpq-envars.html 
 
 ./pgclone   
     --pghost <primary_host>  \

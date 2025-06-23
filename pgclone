@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="0.3.2"
+PGCLONE_VERSION="0.3.3"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -91,7 +91,7 @@ cleanup() {
     done
 
     # Removing temp WAL dir content
-    if [[ -d "${TEMP_WALDIR:-}" && "$TEMP_WALDIR" == /tmp/pgclone_temp.* ]]; then
+    if [[ -d "${TEMP_WALDIR:-}" ]]; then
         log "Removing temp WAL dir $TEMP_WALDIR content..."
         find "$TEMP_WALDIR" -mindepth 1 -delete
     fi
@@ -238,8 +238,11 @@ wait_for_replication_start() {
             || fatal "pg_receivewal exited"
 
         # Check pg_stat_replication for our application_name
-        psql_send "SELECT 1 FROM pg_stat_replication WHERE application_name='$appname' LIMIT 1;"
-        if [[ $(psql_wait | tr -d '[:space:]') == "1" ]]; then
+        local result
+        result=$(psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" \
+            -w -X -A -t -v ON_ERROR_STOP=1 \
+            -c "SELECT EXISTS (SELECT 1 FROM pg_stat_replication WHERE application_name = '$appname')::int;")
+        if [[ "${result//[[:space:]]/}" == "1" ]]; then
             log "WAL streaming is active, continuing..."
             return 0
         fi
@@ -518,7 +521,8 @@ PSQL_IN=$(mktemp -u)
 PSQL_OUT=$(mktemp -u)
 mkfifo "$PSQL_IN" "$PSQL_OUT"
 
-PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -w -X -A -t <"$PSQL_IN" >"$PSQL_OUT" &
+PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" \
+    -w -X -A -t -v ON_ERROR_STOP=1 <"$PSQL_IN" >"$PSQL_OUT" &
 PSQL_PID=$!
 exec 3>"$PSQL_IN"
 psql_send() { echo "$1" >&3; }
@@ -545,7 +549,10 @@ PGAPPNAME="$PG_RCV_APPNAME" pg_receivewal \
     "${pg_rwal_args[@]}" >"$TEMP_WALDIR/pg_receivewal.log" 2>&1 &
 PG_RECEIVEWAL_PID=$!
 sleep 3
-kill -0 "$PG_RECEIVEWAL_PID" 2>/dev/null || fatal "pg_receivewal failed"
+if ! kill -0 "$PG_RECEIVEWAL_PID" 2>/dev/null; then
+    [ -f "$TEMP_WALDIR/pg_receivewal.log" ] && log "$(cat "$TEMP_WALDIR"/pg_receivewal.log)"
+    fatal "pg_receivewal failed"
+fi
 
 # ==== Watchdog for pg_receivewal ====
 (
@@ -560,14 +567,8 @@ PG_RECEIVEWAL_WATCHDOG_PID=$!
 
 wait_for_replication_start "$PG_RCV_APPNAME"
 
-# ==== Backup start ====
-psql_send "SELECT * FROM pg_backup_start('pgclone', true);"
-START_LSN=$(psql_wait | awk -F '|' '{print $1}' | tr -d '[:space:]')
-validate_lsn_format "$START_LSN"
-log "Backup start LSN: $START_LSN"
-
-# ==== Parallel rsync sync (rsyncd + watchdog on replica) ====
-log "Setting up parallel rsync with rsyncd on master..."
+# Start rsyncd on the primary host via SSH
+log "Setting up rsyncd on master..."
 
 RSYNC_SECRET=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
 RSYNC_SECRET_FILE=$(mktemp)
@@ -703,6 +704,14 @@ done
 [[ -z "$RSYNC_PORT" ]] && fatal "Failed to retrieve rsyncd port"
 log "Using rsync port $RSYNC_PORT"
 
+# ==== Run pg_backup_start ====
+log "Running pg_backup_start on primary..."
+psql_send "SELECT * FROM pg_backup_start('pgclone', true);"
+START_LSN=$(psql_wait | awk -F '|' '{print $1}' | tr -d '[:space:]')
+validate_lsn_format "$START_LSN"
+log "Backup start LSN: $START_LSN"
+
+# ======== Configuring and starting rsync =============
 # Setup rsync log arguments
 rsync_log_args=()
 [[ "$VERBOSE" == "1" ]] && rsync_log_args+=(--stats --human-readable)
@@ -759,7 +768,7 @@ fi
 
 log "Parallel rsync done"
 
-# ==== Stop backup ====
+# ==== Run pg_backup_stop ====
 log "Stopping backup..."
 psql_send "
 SELECT lsn,
