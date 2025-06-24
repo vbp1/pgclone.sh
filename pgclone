@@ -93,7 +93,11 @@ cleanup() {
     # Removing temp WAL dir content
     if [[ -d "${TEMP_WALDIR:-}" ]]; then
         log "Removing temp WAL dir $TEMP_WALDIR content..."
-        find "$TEMP_WALDIR" -mindepth 1 -delete
+        if [[ "$TEMP_WALDIR" == /tmp/pgclone_temp.* ]]; then
+            rm -rf "$TEMP_WALDIR"
+        else
+            find "$TEMP_WALDIR" -mindepth 1 -delete
+        fi
     fi
 
     # Cleanup lock if exists
