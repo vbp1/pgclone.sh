@@ -575,7 +575,7 @@ RSYNC_SECRET_FILE=$(mktemp)
 echo "$RSYNC_SECRET" > "$RSYNC_SECRET_FILE"
 chmod 600 "$RSYNC_SECRET_FILE"
 
-PGDATA_HASH=$(echo -n "$PRIMARY_PGDATA" | sha256sum | cut -c1-16)
+PGDATA_HASH=$(head -c 20 /dev/urandom | sha256sum | cut -c1-8)
 RSYNCD_TAG="pgclone_$PGDATA_HASH"
 
 REMOTE_DIR="/tmp/${RSYNCD_TAG}"
@@ -583,10 +583,6 @@ REMOTE_CONF="$REMOTE_DIR/rsyncd.conf"
 REMOTE_SECR="$REMOTE_DIR/rsyncd.secrets"
 REMOTE_PID="$REMOTE_DIR/rsyncd.pid"
 REMOTE_PORT="$REMOTE_DIR/rsyncd.port"
-# this lock is used to ensure that only one rsyncd instance is running
-# for the same PGDATA at a time
-# it is not rsync's lock (determined by lock file parameter in rsyncd.conf)
-REMOTE_LOCK="$REMOTE_DIR/lock"
 
 
 tbl_cnt=${#TBLSPCS[@]}            # 0, if array is empty
@@ -628,9 +624,6 @@ done
 
 # shellcheck disable=SC2029
 ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "mkdir -p '$REMOTE_DIR'"
-# check if rsyncd is already running for this PGDATA
-# shellcheck disable=SC2029
-ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "exec 9> $REMOTE_LOCK && flock -n 9 || { echo 'rsyncd already running for this PGDATA'; exit 1; }"
 # shellcheck disable=SC2029
 ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "cat > '$REMOTE_CONF'" <<<"$RSYNCD_CONF"
 # shellcheck disable=SC2029
@@ -639,13 +632,10 @@ ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "echo 'replica:$RSYNC_SECRET' > '$REMOT
 log "Starting rsyncd daemon on master via SSH..."
 ssh -tt "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
   "RSYNCD_PORT_RANGE='$RSYNCD_PORT_RANGE' TARGET_HOST='$PGHOST' \
-   REMOTE_DIR='$REMOTE_DIR' REMOTE_LOCK='$REMOTE_LOCK' \
+   REMOTE_DIR='$REMOTE_DIR' \
    REMOTE_CONF='$REMOTE_CONF' REMOTE_PORT='$REMOTE_PORT' \
   bash -s" <<'REMOTE_RS' >/dev/null 2>&1 &
 set -euo pipefail
-
-exec 9> $REMOTE_LOCK
-flock -n 9 || { echo 'rsyncd already running for this PGDATA'; exit 1; }
 
 cleanup() {
     [[ -n "${rsyncd_pid:-}" ]] && kill -9 "$rsyncd_pid" 2>/dev/null || true
