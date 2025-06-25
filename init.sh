@@ -16,4 +16,4 @@ chmod 600 /var/lib/postgresql/.ssh/authorized_keys
 
 pg_ctl -D "$PGDATA" restart
 
-touch /var/lib/postgresql/data/ready
+touch "$PGDATA"/ready

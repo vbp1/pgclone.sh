@@ -9,26 +9,26 @@ setup()   { build_image 15; network_up; }
 teardown() { stop_test_env; network_rm; }
 
 @test "PGDATA with a space in path" {
+  export PGDATA='/var/lib/postgresql/data dir'
   docker run --init -d \
     --name "$PRIMARY" \
     --network "$NETWORK" \
     --label "pgclone-test-run=$RUN_ID" \
     -e POSTGRES_PASSWORD=postgres \
-    -e PGDATA=/var/lib/postgresql/"data dir" \
+    -e PGDATA="$PGDATA" \
     -e ROLE=primary \
     -v "$PWD/test-key.pub":/tmp/test-key.pub:ro \
-    -v pgdata_space:/var/lib/postgresql/"data dir" \
     "${IMAGE_BASE}:15" >/dev/null
   _TEST_CONTAINERS+=("$(docker ps -q -f name=$PRIMARY)")
 
-  # Wait for the primary to create the /var/lib/postgresql/data/ready file
+  # Wait for the primary to create the "$PGDATA"/ready file
   for i in {1..30}; do
-    docker exec "$PRIMARY" test -f /var/lib/postgresql/data/ready && break
+    docker exec "$PRIMARY" test -f "$PGDATA"/ready && break
     sleep 1
   done
 
-  docker exec "$PRIMARY" test -f /var/lib/postgresql/data/ready || {
-    echo "[common.sh] File /var/lib/postgresql/data/ready not found after 30 s" >&2
+  docker exec "$PRIMARY" test -f "$PGDATA"/ready || {
+    echo "[common.sh] File $PGDATA/ready not found after 30 s" >&2
     return 1
   }
 
