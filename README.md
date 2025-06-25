@@ -123,7 +123,7 @@ git submodule update --init --recursive
 
 # 2. Run the full suite
 ./run-tests.sh
-
+```
 
 ---
 ## Quick Algorithm Overview
