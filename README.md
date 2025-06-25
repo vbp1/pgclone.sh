@@ -75,28 +75,58 @@ You must set `PGPASSWORD` in the environment for database authentication.
 
 ---
 
-## Quick Demo/Test via Docker
+## Quick Demo via Docker
 
-A sample script [`docker-test.sh`](./docker-test.sh) is provided to test the workflow in a self-contained Docker environment with two containers: `primary` and `replica`.
+A sample script [`demo.sh`](./demo.sh) is provided to test the workflow in a self-contained Docker environment with two containers: `primary` and `replica`.
 
-### To run the test:
+### To run the demo:
 
 ```bash
 git clone https://github.com/vbp1/pgclone.sh 
 cd pgclone.sh
-./docker-test.sh
+./demo.sh
 ```
 This will:
-- Build a test Docker image
+- Build a demo Docker image
 - Launch primary and replica containers
 - Run `pgclone` from the replica to clone from primary
 - Show results (e.g., PG_VERSION on the replica)
 - Optionally configure and start the replica in standby mode
 
-> After the test, you can remove the containers interactively.
+> After the demo, you can remove the containers interactively.
+
+## BATS tests
+
+`tests` directory contains the **Bats**-based unit tests for the `pgclone`
 
 ---
-### Quick Algorithm Overview
+
+### Prerequisites
+
+ - Docker and access to dockerhub 
+  - bash ≥ 5.0
+ - bats-core
+ - bats-support (provided as a git submodule)
+ - bats-assert (provided as a git submodule)
+
+> No `sudo`, no real PostgreSQL instance is needed.
+
+---
+
+### Run test suite
+
+```bash
+# 1. Clone and fetch sub-modules
+git clone https://github.com/vbp1/pgclone.sh
+cd pgclone.sh
+git submodule update --init --recursive
+
+# 2. Run the full suite
+./run-tests.sh
+
+
+---
+## Quick Algorithm Overview
 
 1. **Stream WAL Ahead of Time**
    *Purpose: keep the replica continuously fed with WAL so the later file-level copy is self-consistent and no segment is lost.*
