@@ -1,0 +1,90 @@
+#!/usr/bin/env bats
+# Scenarios E-1 … E-3 – abrupt termination & watchdog
+
+load 'test_helper/bats-support/load'
+load 'test_helper/bats-assert/load'
+load 'common.sh'
+
+setup()   { build_image 15; network_up; }
+teardown() { stop_test_env; network_rm; }
+
+#
+# E-1 – kill pgclone mid-rsync on replica
+#
+@test "watchdog cleans up after pgclone forced kill" {
+  start_primary 15; start_replica 15
+  # first clone async (background)
+  docker exec -u postgres "$REPLICA" bash -c '
+  export PGPASSWORD=postgres; \
+  sed "/^exit 0/i echo \$\$ > /tmp/pgclone.pid; while true; do sleep 1; done" /usr/bin/pgclone > /tmp/pgclone.debug && \
+  chmod +x /tmp/pgclone.debug && \
+  /tmp/pgclone.debug \
+    --pghost pg-primary \
+    --pguser postgres \
+    --primary-pgdata /var/lib/postgresql/data \
+    --replica-pgdata /var/lib/postgresql/data \
+    --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --verbose \
+    > /tmp/pgclone.log 2>&1 & 
+  '
+  docker exec -u postgres "$REPLICA" bash -c "
+    for i in {1..30}; do
+      if test -f /tmp/pgclone.pid; then
+        kill -TERM \$(cat /tmp/pgclone.pid)
+        exit 0
+      fi
+      sleep 1
+    done
+    cat /tmp/pgclone.log
+    echo 'pgclone.pid not found'
+    exit 1
+  "
+  sleep 3
+  check_clean
+}
+
+@test "rsyncd watchdog stops when ssh tunnel killed" {
+  start_primary 15; start_replica 15
+
+  docker exec -u postgres "$REPLICA" bash -c '
+  export PGPASSWORD=postgres; \
+  sed "/^\# TEST_stop_point_1/a echo \\$\\$ > /tmp/pgclone.pid; while [ ! -f /tmp/continue ]; do sleep 1; done" /usr/bin/pgclone > /tmp/pgclone.debug && \
+  chmod +x /tmp/pgclone.debug && \
+  /tmp/pgclone.debug \
+    --pghost pg-primary \
+    --pguser postgres \
+    --primary-pgdata /var/lib/postgresql/data \
+    --replica-pgdata /var/lib/postgresql/data \
+    --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --verbose \
+    > /tmp/pgclone.log 2>&1 & 
+  '
+
+  docker exec -u postgres "$REPLICA" bash -c '
+    for i in {1..30}; do
+      [ -f /tmp/pgclone.pid ] && exit 0
+      sleep 1
+    done
+    echo "pgclone.pid not found" >&2
+    exit 1
+  '
+
+  SSH_PID=$(docker exec "$REPLICA" pgrep -f '^ssh .* postgres@pg-primary')
+  docker exec "$REPLICA" kill -9 "$SSH_PID"
+  docker exec "$REPLICA" touch /tmp/continue
+
+  docker exec -u postgres "$REPLICA" bash -c '
+    for i in {1..30}; do
+      if ! kill -0 $(cat /tmp/pgclone.pid) 2>/dev/null; then
+        exit 0
+      fi
+      sleep 1
+    done
+    cat /tmp/pgclone.log
+    echo "pgclone did not stop in 30s" >&2
+    exit 1
+  '
+
+  sleep 3
+  check_clean
+}

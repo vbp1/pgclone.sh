@@ -5,10 +5,8 @@ load 'test_helper/bats-support/load'
 load 'test_helper/bats-assert/load'
 load 'common.sh'
 
-setup()   { network_up; }
-teardown() { stop_cluster; check_clean; }
-
-build_image 15   # reuse PG15 for all error tests
+setup()   { build_image 15; network_up; }
+teardown() { stop_test_env; network_rm; }
 
 #
 # B-1 – missing PGPASSWORD
@@ -32,7 +30,7 @@ build_image 15   # reuse PG15 for all error tests
   build_image 14
   docker tag "${IMAGE_BASE}:14" "${IMAGE_BASE}:tmp14"
   start_primary tmp14
-  build_image 15; start_replica 15
+  start_replica 15
   run docker exec -u postgres "$REPLICA" bash -c "export PGPASSWORD=postgres; \
     pgclone --pghost pg-primary --pguser postgres \
       --primary-pgdata /var/lib/postgresql/data \
@@ -112,7 +110,7 @@ build_image 15   # reuse PG15 for all error tests
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
       --verbose"
-  run start_replication
+  run start_pg_on_replica
   assert_success
   run docker exec -u postgres "$REPLICA" bash -c "export PGPASSWORD=postgres; \
     pgclone --pghost pg-primary --pguser postgres \

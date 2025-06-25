@@ -12,13 +12,18 @@ declare -a _TEST_CONTAINERS=()
 
 build_image() {
   local pg_ver=$1   # 15 | 16 | 17
-  docker build \
-    --build-arg PG_MAJOR="$pg_ver" \
-    -t "${IMAGE_BASE}:${pg_ver}" .
+  docker image inspect "${IMAGE_BASE}:${pg_ver}" &>/dev/null || \
+    docker build \
+      --build-arg PG_MAJOR="$pg_ver" \
+      -t "${IMAGE_BASE}:${pg_ver}" .
 }
 
 network_up() {
   docker network inspect "$NETWORK" &>/dev/null || docker network create "$NETWORK"
+}
+
+network_rm() {
+  docker network inspect "$NETWORK" &>/dev/null || docker network rm "$NETWORK"
 }
 
 start_primary() {
@@ -92,21 +97,16 @@ declare -a _TEST_CONTAINERS=()
       --verbose'
 }
 
-start_replication() {
+start_pg_on_replica() {
   docker exec -u postgres "$REPLICA" bash -c '
     echo "primary_conninfo = '\''host=pg-primary port=5432 user=postgres password=postgres sslmode=prefer application_name=replica1'\''" >> /var/lib/postgresql/data/postgresql.auto.conf &&
     touch /var/lib/postgresql/data/standby.signal'
   docker exec -u postgres "$REPLICA" pg_ctl -D /var/lib/postgresql/data start -w -t 60
 }
 
-stop_cluster() {
+stop_test_env() {
   docker rm -f --volumes "${_TEST_CONTAINERS[@]}" &>/dev/null || true
   _TEST_CONTAINERS=()
-}
-
-check_clean() {
-  ! pgrep -f "(pg_receivewal|rsync.*--daemon|pgclone_watchdog)" &>/dev/null
-  ! ls -1d /tmp/pgclone_* 2>/dev/null
 }
 
 run_psql() {
@@ -118,4 +118,27 @@ run_psql() {
 export PGPASSWORD=postgres
 psql -U postgres -h 127.0.0.1 -p $port -c "$psql_cmd"
 SH
+}
+
+check_clean() {
+  run docker exec -u postgres "$PRIMARY" pgrep -f '[r]sync.*--daemon'
+  [ "$status" -ne 0 ] || fail "rsync daemon still running on master"
+
+  run docker exec -u postgres "$PRIMARY" find /tmp -maxdepth 1 -type d -name 'pgclone_*'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ] || fail "Leftover /tmp/pgclone_* dirs on master: $output"
+
+  run docker exec -u postgres "$REPLICA" pgrep -f '[p]g_receivewal'
+  [ "$status" -ne 0 ] || fail "pg_receivewal still running on replica"
+
+  if docker exec -u postgres "$REPLICA" [ -d /tmp/pg_wal ]; then
+      run docker exec -u postgres "$REPLICA" find /tmp/pg_wal -mindepth 1
+      [ "$status" -eq 0 ] && [ -z "$output" ] || fail "Temp WAL files remain in /tmp/pg_wal: $output"
+  else
+      run docker exec -u postgres "$REPLICA" find /tmp -maxdepth 1 -type d -name 'pgclone_temp.*'
+      [ "$status" -eq 0 ] && [ -z "$output" ] || fail "Temp WAL files remain in /tmp dir: $output"
+  fi
+
+  run docker exec -u postgres "$REPLICA" pgrep -af '[p]gclone'
+  [ "$status" -ne 0 ] || fail "pgclone process still running on replica: $output"
 }

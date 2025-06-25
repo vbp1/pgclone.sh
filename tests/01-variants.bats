@@ -5,14 +5,13 @@ load 'test_helper/bats-support/load'
 load 'test_helper/bats-assert/load'
 load 'common.sh'
 
-setup()   { network_up; }
-teardown() { stop_cluster; check_clean; }
+setup()   { build_image 15; network_up; }
+teardown() { stop_test_env; network_rm; }
 
 #
 # A-2  – external tablespaces
 #
 @test "clone with two external tablespaces" {
-  build_image 15
   start_primary 15
   start_replica 15
 
@@ -62,10 +61,51 @@ SH
 }
 
 #
-# A-3 – custom --replica-waldir
+# A-3  – read data from db with external tablespaces
+#
+@test "reads data from db" {
+  start_primary 15
+  start_replica 15
+
+  # prepare two tablespaces on primary
+  docker exec -i "$PRIMARY" bash -eux - <<'SH'
+    mkdir -p /tblspc1 /tblspc2
+    chown postgres:postgres /tblspc1 /tblspc2
+SH
+   run_psql pg-primary 5432 "CREATE TABLE t_default(id int);"
+   run_psql pg-primary 5432 "CREATE TABLESPACE t1 LOCATION '/tblspc1';"
+   run_psql pg-primary 5432 "CREATE TABLESPACE t2 LOCATION '/tblspc2';"
+   run_psql pg-primary 5432 "CREATE TABLE t_in_t1(id int) TABLESPACE t1;"
+   run_psql pg-primary 5432 "CREATE TABLE t_in_t2(id int) TABLESPACE t2;"
+   run_psql pg-primary 5432 "INSERT INTO t_default VALUES (12);"
+   run_psql pg-primary 5432 "INSERT INTO t_in_t1 VALUES (123);"
+   run_psql pg-primary 5432 "INSERT INTO t_in_t2 VALUES (1234);"
+
+  docker exec -i "$REPLICA" bash -eux - <<'SH'
+    mkdir -p /tblspc1 /tblspc2
+    chown postgres:postgres /tblspc1 /tblspc2
+SH
+
+  run_pgclone
+
+  start_pg_on_replica
+  run docker exec -u postgres "$REPLICA" psql -Atc "SELECT id FROM t_default;"
+  assert_success
+  assert_output "12"
+
+  run docker exec -u postgres "$REPLICA" psql -Atc "SELECT id FROM t_in_t1;"
+  assert_success
+  assert_output "123"
+
+  run docker exec -u postgres "$REPLICA" psql -Atc "SELECT id FROM t_in_t2;"
+  assert_success
+  assert_output "1234"
+}
+
+#
+# A-4 – custom --replica-waldir
 #
 @test "clone with custom replica waldir" {
-  build_image 15
   start_primary 15
   start_replica 15
 
@@ -95,10 +135,9 @@ SH
 }
 
 #
-# A-4 – custom --temp-waldir is removed afterwards
+# A-5 – custom --temp-waldir is removed afterwards
 #
 @test "temp-waldir directory is cleaned" {
-  build_image 15
   start_primary 15
   start_replica 15
   docker exec -u postgres "$REPLICA" mkdir -p /tmp/my_temp_wal
@@ -123,10 +162,9 @@ SH
 }
 
 #
-# A-5 – primary on non-default port 5444
+# A-6 – primary on non-default port 5444
 #
 @test "clone from primary on port 5444" {
-  build_image 15
   start_primary 15
   docker exec "$PRIMARY" bash -c "printf '\n%s\n' \"echo 'port = 5444' >> \$PGDATA/postgresql.conf\" >> /docker-entrypoint-initdb.d/init.sh"
   docker exec "$PRIMARY" bash -c "printf '\n%s\n' \"pg_ctl -D \\\"\$PGDATA\\\" restart\" >> /docker-entrypoint-initdb.d/init.sh"
@@ -153,10 +191,10 @@ SH
 }
 
 #
-# A-6 – PARALLEL=1 and PARALLEL=8 just complete successfully
+# A-7 – PARALLEL=1 and PARALLEL=8 just complete successfully
 #
 @test "PARALLEL=1 works" {
-  build_image 15; start_primary 15; start_replica 15
+  start_primary 15; start_replica 15
   run docker exec -u postgres "$REPLICA" bash -c "export PGPASSWORD=postgres; \
     pgclone --pghost pg-primary --pguser postgres \
       --primary-pgdata /var/lib/postgresql/data \
@@ -168,7 +206,7 @@ SH
 }
 
 @test "PARALLEL=8 works" {
-  build_image 15; start_primary 15; start_replica 15
+  start_primary 15; start_replica 15
   run docker exec -u postgres "$REPLICA" bash -c "export PGPASSWORD=postgres; \
     pgclone --pghost pg-primary --pguser postgres \
       --primary-pgdata /var/lib/postgresql/data \

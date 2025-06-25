@@ -16,11 +16,12 @@ load 'common.sh'
     docker exec "$REPLICA" test -f /var/lib/postgresql/data/backup_label
     docker exec "$REPLICA" test -s /var/lib/postgresql/data/pg_wal/$(ls /var/lib/postgresql/data/pg_wal | head -1)
 
-    start_replication
+    start_pg_on_replica
     docker exec "$REPLICA" bash -c \
      'export PGPASSWORD=postgres; psql -h localhost -U postgres -Atc "SELECT status FROM pg_stat_wal_receiver;"' \
      | grep -qx "streaming"
 
-    stop_cluster
+    stop_test_env
+    network_rm
   done
 }
