@@ -698,6 +698,11 @@ done
 [[ -z "$RSYNC_PORT" ]] && fatal "Failed to retrieve rsyncd port"
 log "Using rsync port $RSYNC_PORT"
 
+# TEST_stop_point_1
+# This is a test stop point for the 05-aborts.bats test.
+# It is used to verify that the script can be suspended correctly during the test.
+# Used in tests/05-aborts.bats
+
 # ==== Run pg_backup_start ====
 log "Running pg_backup_start on primary..."
 psql_send "SELECT * FROM pg_backup_start('pgclone', true);"
