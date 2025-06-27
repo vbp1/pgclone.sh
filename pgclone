@@ -121,47 +121,43 @@ shquote() {
     printf '%q' "$1"
 }
 
-wait_and_kill_process() {
-    process_pid="$1"
-    process_name="$2"
-    t0=$(date +%s)
-    while kill -0 "$process_pid" 2>/dev/null; do
-        (( $(date +%s) - t0 > PROCESS_TERM_TIMEOUT )) && {
-            log "$process_name did not exit in $PROCESS_TERM_TIMEOUT seconds, trying to kill it..."
-            kill -9 "$process_pid" 2>/dev/null || true
-            break
-        }
-        sleep 1
-    done
-    # Final wait to reap the process, if it's our child
-    wait "$process_pid" 2>/dev/null || true
-}
+terminate_pid() {
+    # Usage: terminate_pid <pid> <name> [<first_signal>]
+    # <first_signal> – optional initial signal to send (e.g. TERM). If omitted, assumes it was sent earlier.
+    local pid="$1" name="$2" first_sig="${3:-}"
 
-watchdog_terminate () {
-    local pid="$1"           # PID of the process to terminate
-    local name="$2"          # Human-readable name for logging
-
-    local t0
-
-    # If PID is empty or the process is already gone — nothing to do
+    # Validate PID and process existence
     [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]] && return 0
     kill -0 "$pid" 2>/dev/null || return 0
 
-    # Attempt a graceful shutdown
-    kill -TERM "$pid" 2>/dev/null || return 0
- 
-    t0=$(date +%s)
+    # Optionally send the initial (graceful) signal
+    if [[ -n "$first_sig" ]]; then
+        kill -"$first_sig" "$pid" 2>/dev/null || true
+    fi
+
+    # Wait until the process exits or timeout expires, then escalate to SIGKILL
+    local t0=$(date +%s)
     while kill -0 "$pid" 2>/dev/null; do
         (( $(date +%s) - t0 >= PROCESS_TERM_TIMEOUT )) && {
-            log "[watchdog] $name (PID=$pid) did not exit within ${PROCESS_TERM_TIMEOUT}s — sending SIGKILL"
+            log "$name (PID=$pid) did not exit within ${PROCESS_TERM_TIMEOUT}s — sending SIGKILL"
             kill -KILL "$pid" 2>/dev/null || true
             break
         }
         sleep 1
     done
 
-    # Reap the child to avoid a zombie, if it really is our child
+    # Reap the child process to avoid zombie (if it is our child)
     wait "$pid" 2>/dev/null || true
+}
+
+# Wrapper preserved for backward compatibility
+wait_and_kill_process() {
+    terminate_pid "$1" "$2"
+}
+
+# Wrapper preserved for backward compatibility
+watchdog_terminate () {
+    terminate_pid "$1" "$2" "TERM"
 }
 
 validate_lsn_format() {
@@ -275,17 +271,17 @@ parallel_rsync_module() {
     # --- Distribute files across workers (ring-hop heuristic) --------------------
     #  1. `file_sorted` contains every file in the module, sorted by size (largest first).
     #  2. `chunksize[i]` keeps current total size assigned to worker *i*.
-    #  3. We advance a cursor `cur` over the worker indexes in a “ring”:
-    #      cur, cur+1, cur+2 … (mod PARALLEL).
+    #  3. We advance a cursor `cur` over the worker indexes in a "ring":
+    #      cur, cur+1, cur+2 ... (mod PARALLEL).
     #    Before appending the next file we look one step ahead (`nxt`) —
     #    if the next worker currently has a smaller cumulative size than
     #    the current one, we hop to it (`cur = nxt`). This simple rule
     #    evens the load without full bin-packing.
-    #  4. The selected worker’s file list is written to `${part_prefix}_$cur`
+    #  4. The selected worker's file list is written to `${part_prefix}_$cur`
     #    and its `chunksize` is updated.
     #
     #  After the loop we recreate the directory tree locally:
-    #   `file_raw` still has “size<TAB>path” pairs. We strip the path,
+    #   `file_raw` still has "size<TAB>path" pairs. We strip the path,
     #   take parent directories, deduplicate and `mkdir -p` each of them
     #   under the destination.  This ensures every sub-directory exists
     #   before rsync starts with `--relative`.
@@ -797,7 +793,7 @@ rm -f "$PSQL_IN" "$PSQL_OUT"
 # We must be certain the WAL segment that contains STOP_LSN is present on the replica
 # *before* we stop pg_receivewal.  Otherwise the standby will ask for that segment
 # during recovery and may fail with:
-#   “requested WAL segment ... has already been removed”
+#   "requested WAL segment ... has already been removed"
 # because the primary could recycle it while the replica never downloaded it.
 # Therefore we determine the exact filename
 # for STOP_LSN and wait until that file shows up in TEMP_WALDIR.
