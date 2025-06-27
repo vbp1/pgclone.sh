@@ -141,4 +141,8 @@ check_clean() {
 
   run docker exec -u postgres "$REPLICA" pgrep -af '[p]gclone'
   [ "$status" -ne 0 ] || fail "pgclone process still running on replica: $output"
+
+  # Ensure no leftover per-run temp directories
+  run docker exec -u postgres "$REPLICA" find /tmp -maxdepth 1 -type d -name 'pgclone_*'
+  [ "$status" -eq 0 ] && [ -z "$output" ] || fail "Leftover pgclone_* dirs on replica: $output"
 }

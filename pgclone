@@ -40,6 +40,7 @@ PART_PREFIX=""
 FILELIST_RAW=""
 FILELIST_SORTED=""
 RSYNC_LOGFILES=()
+RUN_TMPDIR=""
 
 # ==== Logging ====
 log() { [[ "$VERBOSE" == "1" ]] && echo "[$(date '+%F %T')] [pgclone] $*" >&2; return 0; }
@@ -108,6 +109,9 @@ cleanup() {
             rm -f "$LOCK_FILE"
         fi
     fi
+
+    # Remove run-scoped temporary directory entirely
+    [[ -d "${RUN_TMPDIR:-}" ]] && rm -rf "$RUN_TMPDIR"
 
     exit "$rc"
 }
@@ -256,11 +260,18 @@ parallel_rsync_module() {
     local module="$1" dst="$2"
     local part_prefix file_raw file_sorted
 
-    # preparing list of files to copy
-    part_prefix=$(mktemp -u -t pgclone_part_"${module}".XXXX)
-    file_raw=$(mktemp -t pgclone_raw_"${module}".XXXX)
-    file_sorted=$(mktemp -t pgclone_sorted_"${module}".XXXX)
+    # Use a secure temp directory to avoid name races (no -u)
+    local part_dir
+    part_dir=$(TMPDIR="$RUN_TMPDIR" mktemp -d -t pgclone_part_"${module}".XXXXXX)
+    part_prefix="$part_dir/part"
+
+    file_raw=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_raw_"${module}".XXXXXX)
+    file_sorted=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_sorted_"${module}".XXXXXX)
+
     for ((i=0;i<PARALLEL;i++)); do :>"${part_prefix}_$i"; done
+
+    # Remember prefix for later cleanup by the caller
+    PART_PREFIX="$part_prefix"
 
     rsync --list-only --recursive \
           --password-file="$RSYNC_SECRET_FILE" \
@@ -304,7 +315,7 @@ parallel_rsync_module() {
     pids=()
     for idx in "${!parts[@]}"; do
         local logfile
-        logfile=$(mktemp -t pgclone_rsync_"${module}"_"${idx}".XXXX)
+        logfile=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_rsync_"${module}"_"${idx}".XXXXXX)
         RSYNC_LOGFILES+=("$logfile")
         (
             rsync -a --relative --inplace \
@@ -338,6 +349,7 @@ parallel_rsync_module() {
     # Cleanup temporary files
     for f in "${RSYNC_LOGFILES[@]}"; do rm -f "$f"; done
     rm -f "$file_raw" "$file_sorted" "${part_prefix}"*
+    rmdir "$part_dir" 2>/dev/null || true
 
     # Clear the logfiles array for the next run
     RSYNC_LOGFILES=() 
@@ -443,6 +455,11 @@ fi
 # Logging script version
 log "pgclone script version $PGCLONE_VERSION"
 
+# ==== Global run temp directory ====
+# All per-run temporary files/subdirs are created under this directory to simplify cleanup.
+RUN_TMPDIR=$(mktemp -d -t pgclone_.XXXXXX)
+log "Using run temp directory $RUN_TMPDIR"
+
 # ==== Validate ====
 : "${PGHOST:?--pghost required}"
 : "${PGUSER:?--pguser required}"
@@ -454,7 +471,7 @@ log "pgclone script version $PGCLONE_VERSION"
 [[ "$PGPORT"    =~ ^[0-9]+$ ]] || fatal "Invalid port"
 [[ "$PARALLEL"  =~ ^[0-9]+$ ]] || fatal "Invalid parallel"
 
-TEMP_WALDIR="${TEMP_WALDIR:-$(mktemp -d -t pgclone_temp.XXXX)}"
+TEMP_WALDIR="${TEMP_WALDIR:-$(TMPDIR="$RUN_TMPDIR" mktemp -d -t pgclone_temp.XXXXXX)}"
 REPLICA_WALDIR="${REPLICA_WALDIR:-$REPLICA_PGDATA/pg_wal}"
 
 validate_ssh_key "$SSH_KEY"
@@ -517,8 +534,9 @@ check_space fs_need_kb
 
 # ==== Open persistent psql session ====
 log "Open persistent psql session..."
-PSQL_IN=$(mktemp -u)
-PSQL_OUT=$(mktemp -u)
+tmp_psql_dir=$(TMPDIR="$RUN_TMPDIR" mktemp -d -t pgclone_psql_fifo.XXXXXX)
+PSQL_IN="$tmp_psql_dir/in"
+PSQL_OUT="$tmp_psql_dir/out"
 mkfifo "$PSQL_IN" "$PSQL_OUT"
 
 PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" \
@@ -571,7 +589,7 @@ wait_for_replication_start "$PG_RCV_APPNAME"
 log "Setting up rsyncd on master..."
 
 RSYNC_SECRET=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
-RSYNC_SECRET_FILE=$(mktemp)
+RSYNC_SECRET_FILE=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_secr.XXXXXX)
 echo "$RSYNC_SECRET" > "$RSYNC_SECRET_FILE"
 chmod 600 "$RSYNC_SECRET_FILE"
 
@@ -788,7 +806,6 @@ log "Backup stopped at LSN $STOP_LSN and control files written"
 log "Closing persistent psql session..."
 psql_send '\q'
 wait_and_kill_process "$PSQL_PID" "persistent psql session"
-rm -f "$PSQL_IN" "$PSQL_OUT"
 
 # We must be certain the WAL segment that contains STOP_LSN is present on the replica
 # *before* we stop pg_receivewal.  Otherwise the standby will ask for that segment
