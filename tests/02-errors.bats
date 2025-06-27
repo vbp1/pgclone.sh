@@ -119,7 +119,7 @@ teardown() { stop_test_env; network_rm; }
       --ssh-key /tmp/id_rsa --ssh-user postgres \
       --verbose"
   assert_failure
-  assert_output --partial "PostgreSQL appears to be running"
+  assert_output --partial "Seems like PostgreSQL instance already running or stale postmaster.pid has found"
 }
 
 #
