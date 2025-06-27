@@ -80,9 +80,6 @@ run_pgclone() {
   docker exec -u postgres "$REPLICA" bash -c '
     set -euo pipefail
     export PGPASSWORD=postgres
-RUN_ID=${RUN_ID:-pgclone-$RANDOM}
-
-declare -a _TEST_CONTAINERS=()
     pgclone \
       --pghost pg-primary \
       --pgport 5432 \

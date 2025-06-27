@@ -588,13 +588,14 @@ wait_for_replication_start "$PG_RCV_APPNAME"
 # Start rsyncd on the primary host via SSH
 log "Setting up rsyncd on master..."
 
-RSYNC_SECRET=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+# Generate a 16-char hex secret using od (safe under set -euo pipefail)
+RSYNC_SECRET=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
 RSYNC_SECRET_FILE=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_secr.XXXXXX)
 echo "$RSYNC_SECRET" > "$RSYNC_SECRET_FILE"
 chmod 600 "$RSYNC_SECRET_FILE"
 
-PGDATA_HASH=$(head -c 20 /dev/urandom | sha256sum | cut -c1-8)
-RSYNCD_TAG="pgclone_$PGDATA_HASH"
+random_hash=$(head -c 20 /dev/urandom | sha256sum | cut -c1-8)
+RSYNCD_TAG="pgclone_${random_hash}"  # tag for rsyncd remote directory
 
 REMOTE_DIR="/tmp/${RSYNCD_TAG}"
 REMOTE_CONF="$REMOTE_DIR/rsyncd.conf"
