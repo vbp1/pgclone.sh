@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="0.3.3"
+PGCLONE_VERSION="0.3.4"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -125,6 +125,15 @@ shquote() {
     printf '%q' "$1"
 }
 
+# Wrapper for one-liner SSH commands executed with strict bash flags on the remote side.
+# Usage: ssh_exec "<command string>"
+ssh_exec() {
+    # Executes given command string on the primary via SSH with provided options.
+    # Usage: ssh_exec "cmd arg1 arg2"
+    # shellcheck disable=SC2029
+    ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "$@"
+}
+
 terminate_pid() {
     # Usage: terminate_pid <pid> <name> [<first_signal>]
     # <first_signal> – optional initial signal to send (e.g. TERM). If omitted, assumes it was sent earlier.
@@ -140,6 +149,7 @@ terminate_pid() {
     fi
 
     # Wait until the process exits or timeout expires, then escalate to SIGKILL
+    # shellcheck disable=SC2155
     local t0=$(date +%s)
     while kill -0 "$pid" 2>/dev/null; do
         (( $(date +%s) - t0 >= PROCESS_TERM_TIMEOUT )) && {
@@ -178,8 +188,7 @@ estimate_primary_size_mb() {
     local kb
     # shell-quote PGDATA before passing to the remote shell
     # shellcheck disable=SC2029
-    kb=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
-             "du -sk $(shquote "$PRIMARY_PGDATA")" |
+    kb=$(ssh_exec "du -sk $(shquote "$PRIMARY_PGDATA")" |
          awk '{print $1}')
     [[ "$kb" =~ ^[0-9]+$ ]] || fatal "du failed on primary"
     echo $((kb / 1024))
@@ -218,7 +227,7 @@ discover_tablespaces() {
         TBLSPCS_DST[$oid]="$src"
         log "Discovered tablespace: OID=$oid, src=$src, size=${size}KB"
     done < <(
-        ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
+        ssh_exec \
             "for l in ${pgdata_q}/pg_tblspc/*; do
                  [ -L \"\$l\" ] || continue
                  oid=\$(basename \"\$l\")
@@ -509,7 +518,7 @@ if [[ -f "$PIDFILE" ]]; then
 fi
 
 # ==== Check SSH connection ====
-ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "echo OK" >/dev/null ||
+ssh_exec "echo OK" >/dev/null ||
     fatal "SSH test failed"
 
 # ==== Disk space check ====
@@ -642,11 +651,11 @@ for oid in "${!TBLSPCS[@]}"; do
 done
 
 # shellcheck disable=SC2029
-ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "mkdir -p '$REMOTE_DIR'"
+ssh_exec "mkdir -p '$REMOTE_DIR'"
 # shellcheck disable=SC2029
-ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "cat > '$REMOTE_CONF'" <<<"$RSYNCD_CONF"
+ssh_exec "cat > '$REMOTE_CONF'" <<<"$RSYNCD_CONF"
 # shellcheck disable=SC2029
-ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "echo 'replica:$RSYNC_SECRET' > '$REMOTE_SECR' && chmod 600 '$REMOTE_SECR'"
+ssh_exec "echo 'replica:$RSYNC_SECRET' > '$REMOTE_SECR' && chmod 600 '$REMOTE_SECR'"
 
 log "Starting rsyncd daemon on master via SSH..."
 ssh -tt "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
@@ -703,8 +712,7 @@ timeout_sec=$RSYNCD_GET_PORT_TIMEOUT
 t_start=$(date +%s)
 # shellcheck disable=SC2029
 while true; do
-    RSYNC_PORT=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
-                 "cat '$REMOTE_PORT' 2>/dev/null" || true)
+    RSYNC_PORT=$(ssh_exec "cat '$REMOTE_PORT' 2>/dev/null" || true)
     [[ -n "$RSYNC_PORT" ]] && break
     (( $(date +%s) - t_start >= timeout_sec )) && fatal "Failed to retrieve rsyncd port within ${timeout_sec}s"
     sleep 1
@@ -798,8 +806,7 @@ printf '%s' "$BLABEL_B64" | base64 --decode > "$REPLICA_PGDATA/backup_label"
 
 # Copy fresh pg_control produced by pg_backup_stop()
 # shellcheck disable=SC2029
-ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
-    "cat $(shquote "$PRIMARY_PGDATA")/global/pg_control" \
+ssh_exec "cat $(shquote "$PRIMARY_PGDATA")/global/pg_control" \
     > "$REPLICA_PGDATA/global/pg_control"
 
 log "Backup stopped at LSN $STOP_LSN and control files written"
