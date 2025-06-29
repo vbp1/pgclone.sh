@@ -39,6 +39,7 @@ teardown() { stop_test_env; network_rm; }
         --replica-pgdata /var/lib/postgresql/data \
         --slot \
         --ssh-key /tmp/id_rsa --ssh-user postgres \
+        --insecure-ssh \
         --verbose"
   assert_success
   docker exec -u postgres "$REPLICA" test -f /var/lib/postgresql/data/backup_label

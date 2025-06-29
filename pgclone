@@ -20,6 +20,9 @@ VERBOSE=0                   # 1 = print detailed progress/debug logs, 0 = quiet
 USE_SLOT=0                  # 1 = create temporary replication slot, 0 = disabled
 SLOT_NAME=""               # Assigned when USE_SLOT=1
 
+# SSH security option
+INSECURE_SSH=0              # 1 = disable StrictHostKeyChecking (MITM risk); 0 = enforced by default
+
 RSYNCD_PORT_RANGE="45000..45100"   # Port range to search for a free TCP port when
                                    # starting the transient rsync daemon on the primary
 
@@ -133,7 +136,7 @@ trap cleanup EXIT INT TERM
 
 # Safe shell quoting for remote commands
 shquote() {
-    # printf %q даёт POSIX-совместимую экранированную строку
+    # printf %q gives POSIX-compatible escaped string
     printf '%q' "$1"
 }
 
@@ -394,6 +397,7 @@ Usage: pgclone [OPTIONS]
   --temp-waldir      Temporary WAL directory
   --parallel         Number of parallel rsync jobs (default 4)
   --slot             Use a temporary physical replication slot (auto-named, disabled by default)
+  --insecure-ssh     Disable known_hosts verification (equivalent to StrictHostKeyChecking=no) – NOT recommended
   --verbose          Verbose output
   -v, --version      Print version and exit
   -h, --help         Show this help and exit
@@ -434,6 +438,7 @@ while getopts ':hv-:' opt; do
                 temp-waldir)      ;;
                 parallel)         ;;
                 slot)             needs_arg=0 ;;
+                insecure-ssh)     needs_arg=0 ;;
                 *) fatal "Unknown option --$long" ;;
             esac
 
@@ -458,6 +463,7 @@ while getopts ':hv-:' opt; do
                 temp-waldir)      TEMP_WALDIR="$val" ;;
                 parallel)         PARALLEL="$val" ;;
                 slot)             USE_SLOT=1 ;;
+                insecure-ssh)     INSECURE_SSH=1 ;;
             esac
             ;;
         h) show_help=1    ;;
@@ -501,7 +507,14 @@ REPLICA_WALDIR="${REPLICA_WALDIR:-$REPLICA_PGDATA/pg_wal}"
 validate_ssh_key "$SSH_KEY"
 mkdir -p "$REPLICA_PGDATA" "$REPLICA_WALDIR" "$TEMP_WALDIR"
 
-SSH_OPTS=("-i" "$SSH_KEY" "-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=no")
+# Build SSH options depending on security mode
+if [[ "$INSECURE_SSH" == "1" ]]; then
+    # Disable host key verification – insecure, vulnerable to MITM
+    SSH_OPTS=("-i" "$SSH_KEY" "-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=no")
+else
+    # Enforce host key verification – fail fast if host is unknown
+    SSH_OPTS=("-i" "$SSH_KEY" "-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=yes")
+fi
 
 # ==== Check that we are not running as root ====
 if [[ "$(id -u)" -eq 0 ]]; then

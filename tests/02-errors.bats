@@ -18,6 +18,7 @@ teardown() { stop_test_env; network_rm; }
     --primary-pgdata /var/lib/postgresql/data \
     --replica-pgdata /var/lib/postgresql/data \
     --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --insecure-ssh \
     --slot \
     --verbose"
   assert_failure
@@ -37,6 +38,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --verbose"
   assert_failure
@@ -65,6 +67,7 @@ teardown() { stop_test_env; network_rm; }
         --primary-pgdata /var/lib/postgresql/data \
         --replica-pgdata /var/lib/postgresql/data \
         --ssh-key /tmp/id_rsa --ssh-user postgres \
+        --insecure-ssh \
         --slot \
         --verbose"
   assert_failure
@@ -96,6 +99,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --verbose"
   assert_failure
@@ -113,6 +117,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --verbose"
   run start_pg_on_replica
@@ -122,6 +127,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --verbose"
   assert_failure
@@ -138,6 +144,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --verbose"
   assert_failure
@@ -159,8 +166,26 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --verbose"
   assert_failure
   assert_output --partial "permission denied for function pg_backup_start"
+}
+
+#
+# B-8 – fails when primary host key unknown and strict ssh
+#
+@test "fails when primary host key unknown and strict ssh" {
+  start_primary 15
+  start_replica 15
+  run docker exec -u postgres "$REPLICA" bash -c "export PGPASSWORD=postgres; \
+    pgclone --pghost pg-primary --pguser postgres \
+      --primary-pgdata /var/lib/postgresql/data \
+      --replica-pgdata /var/lib/postgresql/data \
+      --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --slot \
+      --verbose"
+  assert_failure
+  assert_output --partial "SSH test failed"
 }

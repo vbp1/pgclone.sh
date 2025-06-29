@@ -126,6 +126,7 @@ SH
       --replica-waldir $REPLICA_WALDIR_CUSTOM \
       --temp-waldir /tmp/pg_wal \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --parallel 4 \
       --verbose"
@@ -155,6 +156,7 @@ SH
       --replica-waldir /var/lib/postgresql/data/pg_wal \
       --temp-waldir /tmp/my_temp_wal \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --parallel 4 \
       --verbose"
@@ -188,6 +190,7 @@ SH
       --pguser postgres --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --verbose"
   assert_success
@@ -202,9 +205,10 @@ SH
     pgclone --pghost pg-primary --pguser postgres \
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
+      --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --parallel 1 \
-      --ssh-key /tmp/id_rsa --ssh-user postgres \
       --verbose"
   assert_success
 }
@@ -215,9 +219,10 @@ SH
     pgclone --pghost pg-primary --pguser postgres \
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
+      --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --parallel 8 \
-      --ssh-key /tmp/id_rsa --ssh-user postgres \
       --verbose"
   assert_success
 }

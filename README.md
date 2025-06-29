@@ -54,6 +54,7 @@ export PGDATABASE=dbname
     --replica-pgdata /var/lib/postgresql/data  \
     --temp-waldir /tmp/pg_wal \
     --slot \
+    # --insecure-ssh \  # uncomment to skip host-key check (NOT recommended) \
     --ssh-key /path/to/id_rsa \
     --ssh-user root \
     --parallel 4    \
@@ -70,6 +71,7 @@ export PGDATABASE=dbname
 - `--parallel`         — number of parallel rsync jobs
 - `--temp-waldir`      - temporary directory for storing WAL files streamed by `pg_receivewal` during the clone.  After the copy is finished, all files from this directory are moved to the replica's `pg_wal` directory. This ensures no WAL segment is lost or overwritten during the initial sync.
 - `--slot`             — create and use an ephemeral physical replication slot (`pgclone_<pid>`). The slot is automatically dropped on completion or if the script terminates abnormally.
+- `--insecure-ssh`     — disable strict host-key verification (`StrictHostKeyChecking=no`). Use **only** for testing; this opens the door for MITM attacks. By default, `pgclone` **requires** the primary host to be present in `~/.ssh/known_hosts` and aborts if the key is unknown.
 
 
 **Note:**  

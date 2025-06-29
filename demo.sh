@@ -86,6 +86,8 @@ docker exec -u postgres "$REPLICA_CONTAINER" bash -c '
     --temp-waldir /tmp/pg_wal \
     --ssh-key /tmp/id_rsa \
     --ssh-user postgres \
+    --insecure-ssh \
+    --slot \
     --parallel 4 \
     --verbose'
 

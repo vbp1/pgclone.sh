@@ -24,6 +24,7 @@ teardown() { stop_test_env; network_rm; }
     --primary-pgdata /var/lib/postgresql/data \
     --replica-pgdata /var/lib/postgresql/data \
     --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --insecure-ssh \
     --verbose \
     > /tmp/pgclone.log 2>&1 & 
   '
@@ -56,6 +57,7 @@ teardown() { stop_test_env; network_rm; }
     --primary-pgdata /var/lib/postgresql/data \
     --replica-pgdata /var/lib/postgresql/data \
     --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --insecure-ssh \
     --verbose \
     > /tmp/pgclone.log 2>&1 & 
   '

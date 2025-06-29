@@ -21,6 +21,7 @@ teardown() { stop_test_env; network_rm; }
     --primary-pgdata /var/lib/postgresql/data \
     --replica-pgdata /var/lib/postgresql/data \
     --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --insecure-ssh \
     --slot \
     --verbose \
   > /tmp/pgclone.log 2>&1 &  
@@ -32,6 +33,7 @@ teardown() { stop_test_env; network_rm; }
     --primary-pgdata /var/lib/postgresql/data \
     --replica-pgdata /var/lib/postgresql/data \
     --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --insecure-ssh \
     --slot \
     --verbose"
   assert_failure
@@ -47,6 +49,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/replica1 \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --verbose" &
   sleep 2
@@ -55,6 +58,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/replica2 \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --verbose" &
   wait

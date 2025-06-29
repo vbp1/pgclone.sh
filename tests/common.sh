@@ -90,6 +90,7 @@ run_pgclone() {
       --temp-waldir /tmp/pg_wal \
       --ssh-key /tmp/id_rsa \
       --ssh-user postgres \
+      --insecure-ssh \
       --slot \
       --parallel 4 \
       --verbose'
