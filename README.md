@@ -11,6 +11,8 @@
 - **Parallel database sync via rsync+rsyncd**
 - Streaming WAL with `pg_receivewal`
 - Automated testing/demo via Docker (`docker-test.sh`)
+- Debug-friendly flags: `--debug` (shell trace) and `--keep-run-tmp` (preserve temp files)
+- Can wipe an existing replica directory with `--drop-existing`
 
 ---
 
@@ -53,6 +55,7 @@ export PGDATABASE=dbname
     --primary-pgdata /var/lib/postgresql/data  \
     --replica-pgdata /var/lib/postgresql/data  \
     --temp-waldir /tmp/pg_wal \
+    # --drop-existing \ # uncomment to remove exising data on target replica
     --slot \
     # --insecure-ssh \  # uncomment to skip host-key check (NOT recommended) \
     --ssh-key /path/to/id_rsa \
@@ -70,7 +73,10 @@ export PGDATABASE=dbname
 - `--ssh-user`         — SSH user
 - `--parallel`         — number of parallel rsync jobs
 - `--temp-waldir`      - temporary directory for storing WAL files streamed by `pg_receivewal` during the clone.  After the copy is finished, all files from this directory are moved to the replica's `pg_wal` directory. This ensures no WAL segment is lost or overwritten during the initial sync.
+- `--drop-existing`    — **dangerous**: remove any data found in the target `--replica-pgdata` and its `pg_wal` directory before starting the clone.
+- `--debug`            — run the script in *x-trace* mode (`set -x`), printing every executed command for troubleshooting.
 - `--slot`             — create and use an ephemeral physical replication slot (`pgclone_<pid>`). The slot is automatically dropped on completion or if the script terminates abnormally.
+- `--keep-run-tmp`     — keep the per-run temporary directory (shown in the log) instead of deleting it on exit.
 - `--insecure-ssh`     — disable strict host-key verification (`StrictHostKeyChecking=no`). Use **only** for testing; this opens the door for MITM attacks. By default, `pgclone` **requires** the primary host to be present in `~/.ssh/known_hosts` and aborts if the key is unknown.
 
 
@@ -160,4 +166,16 @@ git submodule update --init --recursive
 > **Result:** A ready-to-start physical replica seeded while the primary stayed online, with live WAL streaming, parallel file copy, and built-in fault-tolerance.
 
 An optional transient replication slot is created and dropped by the `pg_receivewal` utility itself (`--create-slot/--drop-slot`) and is automatically cleaned up when the script finishes (even on failure).
+
+**Environment overrides (timeouts)**  
+Any of the internal timeout constants can be tuned through environment variables prior to launching **pgclone**:
+
+```bash
+export RSYNCD_GET_PORT_TIMEOUT=90       # wait longer for rsyncd to report its port
+export REPLICATION_START_TIMEOUT=120    # allow 2 minutes for pg_receivewal to show up
+export PROCESS_TERM_TIMEOUT=120         # give children more time to shut down
+export WAL_WAIT_TIMEOUT=120             # wait longer for the STOP_LSN segment
+```
+
+If an override is not set, the script falls back to its built-in defaults.
 

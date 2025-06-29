@@ -26,11 +26,17 @@ INSECURE_SSH=0              # 1 = disable StrictHostKeyChecking (MITM risk); 0 =
 RSYNCD_PORT_RANGE="45000..45100"   # Port range to search for a free TCP port when
                                    # starting the transient rsync daemon on the primary
 
+# --- behaviour flags (set via CLI) ---
+DROP_EXISTING=0            # 1 = remove existing replica pgdata and pg_wal before cloning
+DEBUG=0                    # 1 = enable bash tracing (`set -x`)
+KEEP_RUN_TMP=0             # 1 = preserve RUN_TMPDIR after script finishes
+
 # ---- timeouts (seconds) ----
-RSYNCD_GET_PORT_TIMEOUT=30   # Max time to wait for the primary to report the chosen rsyncd port
-REPLICATION_START_TIMEOUT=60 # Wait for pg_receivewal to appear in pg_stat_replication
-PROCESS_TERM_TIMEOUT=60      # Grace period after SIGTERM before a child process is force-killed
-WAL_WAIT_TIMEOUT=60          # How long to wait for the WAL segment containing STOP_LSN to arrive
+# These can be overridden via environment variables before running the script.
+RSYNCD_GET_PORT_TIMEOUT=${RSYNCD_GET_PORT_TIMEOUT:-30}   # Max time (s) to wait for the primary to report the chosen rsyncd port
+REPLICATION_START_TIMEOUT=${REPLICATION_START_TIMEOUT:-60} # Wait (s) for pg_receivewal to appear in pg_stat_replication
+PROCESS_TERM_TIMEOUT=${PROCESS_TERM_TIMEOUT:-60}          # Grace period (s) after SIGTERM before a child process is force-killed
+WAL_WAIT_TIMEOUT=${WAL_WAIT_TIMEOUT:-60}                  # Wait (s) for the WAL segment containing STOP_LSN to arrive
 
 declare -A TBLSPCS=()          # oid -> src (master)
 declare -A TBLSPCS_SIZE_KB=()  # oid -> size KB
@@ -115,9 +121,13 @@ cleanup() {
         fi
     done
 
-    # Remove run-scoped temporary directory entirely
-    log "Removing run-scoped temporary directory $RUN_TMPDIR..."
-    [[ -d "${RUN_TMPDIR:-}" ]] && rm -rf "$RUN_TMPDIR"
+    # Remove run-scoped temporary directory (unless --keep-run-tmp)
+    if [[ "$KEEP_RUN_TMP" == "1" ]]; then
+        log "--keep-run-tmp set, keeping $RUN_TMPDIR for inspection"
+    else
+        log "Removing run-scoped temporary directory $RUN_TMPDIR..."
+        [[ -d "${RUN_TMPDIR:-}" ]] && rm -rf "$RUN_TMPDIR"
+    fi
 
     # Cleanup lock if exists
     if [[ -n "${LOCK_FILE:-}" && -f "$LOCK_FILE" ]]; then
@@ -401,6 +411,9 @@ Usage: pgclone [OPTIONS]
   --ssh-user         SSH user (login on primary host)
   --temp-waldir      Temporary WAL directory
   --parallel         Number of parallel rsync jobs (default 4)
+  --drop-existing    Remove existing data in replica pgdata and pg_wal before cloning
+  --debug            Enable bash trace (set -x) for troubleshooting
+  --keep-run-tmp     Preserve temporary run directory after completion (for debugging)
   --slot             Use a temporary physical replication slot (auto-named, disabled by default)
   --insecure-ssh     Disable known_hosts verification (equivalent to StrictHostKeyChecking=no) – NOT recommended
   --verbose          Verbose output
@@ -442,6 +455,9 @@ while getopts ':hv-:' opt; do
                 ssh-user)         ;;
                 temp-waldir)      ;;
                 parallel)         ;;
+                drop-existing)    needs_arg=0 ;;
+                debug)            needs_arg=0 ;;
+                keep-run-tmp)     needs_arg=0 ;;
                 slot)             needs_arg=0 ;;
                 insecure-ssh)     needs_arg=0 ;;
                 *) fatal "Unknown option --$long" ;;
@@ -467,6 +483,9 @@ while getopts ':hv-:' opt; do
                 ssh-user)         SSH_USER="$val" ;;
                 temp-waldir)      TEMP_WALDIR="$val" ;;
                 parallel)         PARALLEL="$val" ;;
+                drop-existing)    DROP_EXISTING=1 ;;
+                debug)            DEBUG=1 ;;
+                keep-run-tmp)     KEEP_RUN_TMP=1 ;;
                 slot)             USE_SLOT=1 ;;
                 insecure-ssh)     INSECURE_SSH=1 ;;
             esac
@@ -490,6 +509,12 @@ fi
 # Logging script version
 log "pgclone script version $PGCLONE_VERSION"
 
+# Enable bash tracing if requested
+if [[ "$DEBUG" == "1" ]]; then
+    set -x
+    log "Debug tracing enabled (--debug)"
+fi
+
 # ==== Global run temp directory ====
 # All per-run temporary files/subdirs are created under this directory to simplify cleanup.
 RUN_TMPDIR=$(mktemp -d -t pgclone_.XXXXXX)
@@ -510,6 +535,14 @@ TEMP_WALDIR="${TEMP_WALDIR:-$(TMPDIR="$RUN_TMPDIR" mktemp -d -t pgclone_temp.XXX
 REPLICA_WALDIR="${REPLICA_WALDIR:-$REPLICA_PGDATA/pg_wal}"
 
 validate_ssh_key "$SSH_KEY"
+
+# Remove existing replica directories when --drop-existing is specified
+if [[ "$DROP_EXISTING" == "1" ]]; then
+    log "--drop-existing: removing existing data in $REPLICA_PGDATA and $REPLICA_WALDIR ..."
+    rm -rf "$REPLICA_PGDATA" "$REPLICA_WALDIR" || fatal "Failed to remove old replica directories"
+fi
+
+# Ensure replica directories exist after potential removal
 mkdir -p "$REPLICA_PGDATA" "$REPLICA_WALDIR" "$TEMP_WALDIR"
 
 # Build SSH options depending on security mode
