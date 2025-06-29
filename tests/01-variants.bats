@@ -11,59 +11,7 @@ teardown() { stop_test_env; network_rm; }
 #
 # A-2  – external tablespaces
 #
-@test "clone with two external tablespaces" {
-  start_primary 15
-  start_replica 15
-
-  # prepare two tablespaces on primary
-  docker exec -i "$PRIMARY" bash -eux - <<'SH'
-    mkdir -p /tblspc1 /tblspc2
-    chown postgres:postgres /tblspc1 /tblspc2
-SH
-   run_psql pg-primary 5432 "CREATE TABLESPACE t1 LOCATION '/tblspc1';"
-   run_psql pg-primary 5432 "CREATE TABLESPACE t2 LOCATION '/tblspc2';"
-   run_psql pg-primary 5432 "CREATE TABLE t_in_t1(id int) TABLESPACE t1;"
-   run_psql pg-primary 5432 "CREATE TABLE t_in_t2(id int) TABLESPACE t2;"
-   run_psql pg-primary 5432 "INSERT INTO t_in_t1 SELECT generate_series(1, 10000);"
-   run_psql pg-primary 5432 "INSERT INTO t_in_t2 SELECT generate_series(10001, 20000);"
-
-  docker exec -i "$REPLICA" bash -eux - <<'SH'
-    mkdir -p /tblspc1 /tblspc2
-    chown postgres:postgres /tblspc1 /tblspc2
-SH
-
-  run_pgclone
-
-  # verify tablespaces copied
-  docker exec -u postgres "$REPLICA" test -d /tblspc1
-  docker exec -u postgres "$REPLICA" test -d /tblspc2
-
-  for spc in tblspc1 tblspc2; do
-    primary_hash=$(docker exec -u postgres "$PRIMARY" find "/$spc" -type f -exec md5sum {} + | sort | md5sum)
-    replica_hash=$(docker exec -u postgres "$REPLICA" find "/$spc" -type f -exec md5sum {} + | sort | md5sum)
-    echo "primary_hash=$primary_hash, replica_hash=$replica_hash"
-    [[ "$primary_hash" = "$replica_hash" ]]
-  done
-
-
-  for spc in /tblspc1 /tblspc2; do
-    docker exec -u postgres "$REPLICA" bash -c "
-      for link in /var/lib/postgresql/data/pg_tblspc/*; do
-        target=\$(readlink -f \"\$link\")
-        if [[ \"\$target\" == \"$spc\" ]]; then
-          exit 0
-        fi
-      done
-      echo 'No link points to $spc'
-      exit 1
-    "
-  done
-}
-
-#
-# A-3  – read data from db with external tablespaces
-#
-@test "reads data from db" {
+@test "clone with two external tablespaces and read data" {
   start_primary 15
   start_replica 15
 
@@ -77,9 +25,9 @@ SH
    run_psql pg-primary 5432 "CREATE TABLESPACE t2 LOCATION '/tblspc2';"
    run_psql pg-primary 5432 "CREATE TABLE t_in_t1(id int) TABLESPACE t1;"
    run_psql pg-primary 5432 "CREATE TABLE t_in_t2(id int) TABLESPACE t2;"
-   run_psql pg-primary 5432 "INSERT INTO t_default VALUES (12);"
-   run_psql pg-primary 5432 "INSERT INTO t_in_t1 VALUES (123);"
-   run_psql pg-primary 5432 "INSERT INTO t_in_t2 VALUES (1234);"
+   run_psql pg-primary 5432 "INSERT INTO t_default SELECT generate_series(1, 100);"
+   run_psql pg-primary 5432 "INSERT INTO t_in_t1 SELECT generate_series(1, 10000);"
+   run_psql pg-primary 5432 "INSERT INTO t_in_t2 SELECT generate_series(10001, 15000);"
 
   docker exec -i "$REPLICA" bash -eux - <<'SH'
     mkdir -p /tblspc1 /tblspc2
@@ -88,22 +36,40 @@ SH
 
   run_pgclone
 
+  # verify tablespaces copied
+  docker exec -u postgres "$REPLICA" test -d /tblspc1
+  docker exec -u postgres "$REPLICA" test -d /tblspc2
+
+  for spc in /tblspc1 /tblspc2; do
+    docker exec -u postgres "$REPLICA" bash -c "
+      for link in /var/lib/postgresql/data/pg_tblspc/*; do
+        target=\$(readlink -f \"\$link\")
+        if [[ \"\$target\" == \"$spc\" ]]; then
+          exit 0
+        fi
+      done
+      echo 'No link points to $spc'
+      exit 1
+    "
+  done
+
   start_pg_on_replica
-  run docker exec -u postgres "$REPLICA" psql -Atc "SELECT id FROM t_default;"
-  assert_success
-  assert_output "12"
 
-  run docker exec -u postgres "$REPLICA" psql -Atc "SELECT id FROM t_in_t1;"
+  run docker exec -u postgres "$REPLICA" psql -Atc "SELECT sum(id) FROM t_default;"
   assert_success
-  assert_output "123"
+  assert_output "5050"
 
-  run docker exec -u postgres "$REPLICA" psql -Atc "SELECT id FROM t_in_t2;"
+  run docker exec -u postgres "$REPLICA" psql -Atc "SELECT sum(id) FROM t_in_t1;"
   assert_success
-  assert_output "1234"
+  assert_output "50005000"
+
+  run docker exec -u postgres "$REPLICA" psql -Atc "SELECT sum(id) FROM t_in_t2;"
+  assert_success
+  assert_output "62502500"
 }
 
 #
-# A-4 – custom --replica-waldir
+# A-3 – custom --replica-waldir
 #
 @test "clone with custom replica waldir" {
   start_primary 15
@@ -137,7 +103,7 @@ SH
 }
 
 #
-# A-5 – custom --temp-waldir is removed afterwards
+# A-4 – custom --temp-waldir is removed afterwards
 #
 @test "temp-waldir directory is cleaned" {
   start_primary 15
@@ -166,7 +132,7 @@ SH
 }
 
 #
-# A-6 – primary on non-default port 5444
+# A-5 – primary on non-default port 5444
 #
 @test "clone from primary on port 5444" {
   start_primary 15
@@ -197,7 +163,7 @@ SH
 }
 
 #
-# A-7 – PARALLEL=1 and PARALLEL=8 just complete successfully
+# A-6 – PARALLEL=1 and PARALLEL=8 just complete successfully
 #
 @test "PARALLEL=1 works" {
   start_primary 15; start_replica 15
