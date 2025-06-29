@@ -50,6 +50,7 @@ start_primary() {
   }
 
   # Wait for the primary to become ready
+  # shellcheck disable=SC2034
   for i in {1..30}; do
     docker exec "$PRIMARY" pg_isready -U postgres -q && break
     sleep 1
@@ -119,6 +120,7 @@ psql -U postgres -h 127.0.0.1 -p $port -c "$psql_cmd"
 SH
 }
 
+# shellcheck disable=SC2154
 check_clean() {
   run docker exec -u postgres "$PRIMARY" pgrep -f '[r]sync.*--daemon'
   [ "$status" -ne 0 ] || fail "rsync daemon still running on master"
@@ -132,20 +134,40 @@ check_clean() {
 
   if docker exec -u postgres "$REPLICA" [ -d /tmp/pg_wal ]; then
       run docker exec -u postgres "$REPLICA" find /tmp/pg_wal -mindepth 1
-      [ "$status" -eq 0 ] && [ -z "$output" ] || fail "Temp WAL files remain in /tmp/pg_wal: $output"
+      if [ "$status" -eq 0 ] && [ -z "$output" ]; then
+        : # No action needed
+      else
+        fail "Temp WAL files remain in /tmp/pg_wal: $output"
+      fi
   else
       run docker exec -u postgres "$REPLICA" find /tmp -maxdepth 1 -type d -name 'pgclone_temp.*'
-      [ "$status" -eq 0 ] && [ -z "$output" ] || fail "Temp WAL files remain in /tmp dir: $output"
+      if [ "$status" -eq 0 ] && [ -z "$output" ]; then
+        : # No action needed
+      else
+        fail "Temp WAL files remain in /tmp dir: $output"
+      fi
   fi
 
   run docker exec -u postgres "$REPLICA" pgrep -af '[p]gclone'
   [ "$status" -ne 0 ] || fail "pgclone process still running on replica: $output"
 
+  # Ensure no leftover rsync worker processes on replica
+  run docker exec -u postgres "$REPLICA" pgrep -f '[r]sync -a'
+  [ "$status" -ne 0 ] || fail "rsync worker processes still running on replica: $output"
+
   # Ensure no leftover per-run temp directories
   run docker exec -u postgres "$REPLICA" find /tmp -maxdepth 1 -type d -name 'pgclone_*'
-  [ "$status" -eq 0 ] && [ -z "$output" ] || fail "Leftover pgclone_* dirs on replica: $output"
+  if [ "$status" -eq 0 ] && [ -z "$output" ]; then
+    : # No action needed
+  else
+    fail "Leftover pgclone_* dirs on replica: $output"
+  fi
 
   # Ensure temporary replication slot removed on primary
   run docker exec -u postgres "$PRIMARY" psql -At -c "SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE 'pgclone_%';"
-  [ "$status" -eq 0 ] && [ -z "$output" ] || fail "Replication slot still exists on primary: $output"
+  if [ "$status" -eq 0 ] && [ -z "$output" ]; then
+    : # No action needed
+  else
+    fail "Replication slot still exists on primary: $output"
+  fi
 }

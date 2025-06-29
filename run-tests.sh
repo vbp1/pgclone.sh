@@ -9,10 +9,10 @@ cleanup_all() {
 
 trap cleanup_all EXIT
 
-# 1) убедимся, что есть ключи ssh
+# 1) ensure we have ssh keys
 [[ -f test-key && -f test-key.pub ]] || ssh-keygen -t rsa -b 2048 -N "" -f test-key -q
 
-# 2) установим bats (однажды в CI, локально — тоже однажды)
+# 2) install bats (once in CI, once locally)
 if ! command -v bats &>/dev/null; then
   echo "Installing bats-core locally…"
   git clone --depth 1 https://github.com/bats-core/bats-core.git .bats-tmp
@@ -20,5 +20,5 @@ if ! command -v bats &>/dev/null; then
   rm -rf .bats-tmp
 fi
 
-# 3) прогоняем все файлы tests/*.bats
+# 3) run all tests in tests/*.bats
 bats --timing tests

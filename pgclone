@@ -43,9 +43,6 @@ CLEANUP_DONE=0
 RSYNC_SECRET=""
 RSYNCD_SSH_PID=""
 RSYNCD_WATCHDOG_PID=""
-PART_PREFIX=""
-FILELIST_RAW=""
-FILELIST_SORTED=""
 RSYNC_LOGFILES=()
 RUN_TMPDIR=""
 
@@ -88,33 +85,17 @@ cleanup() {
         wait_and_kill_process "$RSYNCD_WATCHDOG_PID" "rsyncd watchdog"
     fi
 
-    # Cleanup temp files created for --files-from
-    [[ -n "${FILELIST_RAW:-}" && -f "$FILELIST_RAW"    ]] && rm -f "$FILELIST_RAW"
-    [[ -n "${FILELIST_SORTED:-}" && -f "$FILELIST_SORTED"    ]] && rm -f "$FILELIST_SORTED"
-    [[ -n "${PART_PREFIX:-}" ]] && { rm -f "${PART_PREFIX}"* 2>/dev/null || true; }
-
-    # Cleanup rsync worker logfiles
-    for f in "${RSYNC_LOGFILES[@]}"; do
-        [[ -f "$f" ]] && rm -f "$f"
-    done
+    # Stop psql
+    if [[ -n "${PSQL_PID:-}" ]]; then
+        log "Killing psql PID=$PSQL_PID"
+        kill -9 "$PSQL_PID" 2>/dev/null || true
+        wait "$PSQL_PID" 2>/dev/null || true
+    fi
 
     # Removing temp WAL dir content
     if [[ -d "${TEMP_WALDIR:-}" ]]; then
         log "Removing temp WAL dir $TEMP_WALDIR content..."
-        if [[ "$TEMP_WALDIR" == /tmp/pgclone_temp.* ]]; then
-            rm -rf "$TEMP_WALDIR"
-        else
-            find "$TEMP_WALDIR" -mindepth 1 -delete
-        fi
-    fi
-
-    # Cleanup lock if exists
-    if [[ -n "${LOCK_FILE:-}" && -f "$LOCK_FILE" ]]; then
-        # Delete the lock file only if we still hold its file descriptor 
-        # (i.e., the file descriptor is still open).
-        if flock -n 200; then
-            rm -f "$LOCK_FILE"
-        fi
+        find "$TEMP_WALDIR" -mindepth 1 -delete
     fi
 
     # Drop temporary replication slot if it was created
@@ -125,12 +106,33 @@ cleanup() {
             --no-password --drop-slot --slot="$SLOT_NAME" >/dev/null 2>&1 || true
     fi
 
+    # --- ensure no children processes remain -------------------
+    for cpid in $(pgrep -P $$ 2>/dev/null || true); do
+        if kill -0 "$cpid" 2>/dev/null; then
+            cmd=$(ps -o comm= -p "$cpid" 2>/dev/null || true)
+            log "Cleaning up child process PID=$cpid, CMD=$cmd"
+            terminate_pid "$cpid" "$cmd" "TERM"
+        fi
+    done
+
     # Remove run-scoped temporary directory entirely
+    log "Removing run-scoped temporary directory $RUN_TMPDIR..."
     [[ -d "${RUN_TMPDIR:-}" ]] && rm -rf "$RUN_TMPDIR"
 
+    # Cleanup lock if exists
+    if [[ -n "${LOCK_FILE:-}" && -f "$LOCK_FILE" ]]; then
+        # Delete the lock file only if we still hold its file descriptor 
+        # (i.e., the file descriptor is still open).
+        if flock -n 200; then
+            log "Removing lock file $LOCK_FILE..."
+            rm -f "$LOCK_FILE"
+        fi
+    fi
+
+    log "Cleanup complete (rc=$rc)"
     exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM ERR
 
 # ==== Helpers ====
 
@@ -294,9 +296,6 @@ parallel_rsync_module() {
 
     for ((i=0;i<PARALLEL;i++)); do :>"${part_prefix}_$i"; done
 
-    # Remember prefix for later cleanup by the caller
-    PART_PREFIX="$part_prefix"
-
     rsync --list-only --recursive \
           --password-file="$RSYNC_SECRET_FILE" \
           "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" |
@@ -354,8 +353,14 @@ parallel_rsync_module() {
         pids+=($!)
     done
 
-    # Wait for all rsync workers to finish
-    for p in "${pids[@]}"; do wait "$p"; done
+    # ---------------- Wait for all rsync workers ------------------------------
+    remaining=${#pids[@]}
+    while (( remaining > 0 )); do
+        if ! wait -n; then          # first worker with rc!=0
+            fatal "rsync worker failed"  # cleanup will kill the rest workers
+        fi
+        ((remaining--))             # successful worker
+    done
 
     # print rsync worker logs if verbose
     if [[ "$VERBOSE" == "1" ]]; then
@@ -522,7 +527,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 # ==== Check tools ====
-for t in ssh psql pg_ctl pg_receivewal rsync find du split awk sha256sum od; do
+for t in ssh psql pg_ctl pg_receivewal rsync find du split awk sha256sum od ps pgrep; do
     command -v "$t" >/dev/null || fatal "$t not found"
 done
 
@@ -589,7 +594,7 @@ ver=$(psql_wait | tr -d '[:space:]')
 [[ -z "$ver" ]] && fatal "Could not retrieve PostgreSQL version"
 [[ "$ver" -ge 150000 ]] || fatal "PostgreSQL >= 15 required"
 
-# ==== Start pg_receivewal (no slot) ====
+# ==== Start pg_receivewal  ====
 PG_RCV_APPNAME="pgclone-$$"      # unique application_name for this run
 
 # Configure replication slot if requested
@@ -745,7 +750,7 @@ RSYNCD_SSH_PID=$!
     while kill -0 "$main_pid" 2>/dev/null; do
         sleep 1
     done
-    log "[watchdog] Main process $main_pid died ⇒ terminating rsyncd-ssh PID=$RSYNCD_SSH_PID"
+    log "[watchdog] Main process $main_pid died -> terminating rsyncd-ssh PID=$RSYNCD_SSH_PID"
     watchdog_terminate "$RSYNCD_SSH_PID" "rsyncd ssh session"
 ) &
 RSYNCD_WATCHDOG_PID=$!
@@ -783,6 +788,7 @@ rsync_log_args=()
 
 # ==== Initial rsync of all PGDATA except pg_wal and base, transient and temp files ====
 log "Initial rsync of PGDATA (excluding base, pg_wal, transient and temp files)..."
+logfile=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_rsync_initial.XXXXXX)
 rsync -a --delete \
     --exclude 'pg_wal/' \
     --exclude 'base/' \
@@ -799,7 +805,8 @@ rsync -a --delete \
     --exclude 'pg_internal.init' \
     "${rsync_log_args[@]}" \
     --password-file="$RSYNC_SECRET_FILE" \
-    "rsync://replica@$PGHOST:$RSYNC_PORT/pgdata/" "$REPLICA_PGDATA/"
+    "rsync://replica@$PGHOST:$RSYNC_PORT/pgdata/" "$REPLICA_PGDATA/" \
+    >"$logfile" 2>&1
 
 # Ensure empty base directory exist
 mkdir -p "$REPLICA_PGDATA/base"
