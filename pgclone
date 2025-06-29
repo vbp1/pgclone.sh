@@ -694,19 +694,18 @@ for oid in "${!TBLSPCS[@]}"; do
     log "Added tablespace OID=$oid to rsyncd config"
 done
 
-# shellcheck disable=SC2029
-ssh_exec "mkdir -p '$REMOTE_DIR'"
-# shellcheck disable=SC2029
-ssh_exec "cat > '$REMOTE_CONF'" <<<"$RSYNCD_CONF"
-# shellcheck disable=SC2029
-ssh_exec "echo 'replica:$RSYNC_SECRET' > '$REMOTE_SECR' && chmod 600 '$REMOTE_SECR'"
+ssh_exec "mkdir -p $(shquote "$REMOTE_DIR")"
+ssh_exec "cat > $(shquote "$REMOTE_CONF")" <<<"$RSYNCD_CONF"
+ssh_exec "echo 'replica:$RSYNC_SECRET' > $(shquote "$REMOTE_SECR") && chmod 600 $(shquote "$REMOTE_SECR")"
 
 log "Starting rsyncd daemon on master via SSH..."
-ssh -tt "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" \
-  "RSYNCD_PORT_RANGE='$RSYNCD_PORT_RANGE' TARGET_HOST='$PGHOST' \
-   REMOTE_DIR='$REMOTE_DIR' \
-   REMOTE_CONF='$REMOTE_CONF' REMOTE_PORT='$REMOTE_PORT' \
-  bash -s" <<'REMOTE_RS' >/dev/null 2>&1 &
+
+# Build remote command with safe shell quoting for each variable to prevent injection
+remote_cmd=$(printf 'RSYNCD_PORT_RANGE=%q TARGET_HOST=%q REMOTE_DIR=%q REMOTE_CONF=%q REMOTE_PORT=%q bash -s' \
+            "$RSYNCD_PORT_RANGE" "$PGHOST" "$REMOTE_DIR" "$REMOTE_CONF" "$REMOTE_PORT")
+
+
+ssh -tt "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "$remote_cmd" <<'REMOTE_RS' >/dev/null 2>&1 &
 set -euo pipefail
 
 cleanup() {
