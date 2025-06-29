@@ -90,6 +90,7 @@ run_pgclone() {
       --temp-waldir /tmp/pg_wal \
       --ssh-key /tmp/id_rsa \
       --ssh-user postgres \
+      --slot \
       --parallel 4 \
       --verbose'
 }
@@ -142,4 +143,8 @@ check_clean() {
   # Ensure no leftover per-run temp directories
   run docker exec -u postgres "$REPLICA" find /tmp -maxdepth 1 -type d -name 'pgclone_*'
   [ "$status" -eq 0 ] && [ -z "$output" ] || fail "Leftover pgclone_* dirs on replica: $output"
+
+  # Ensure temporary replication slot removed on primary
+  run docker exec -u postgres "$PRIMARY" psql -At -c "SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE 'pgclone_%';"
+  [ "$status" -eq 0 ] && [ -z "$output" ] || fail "Replication slot still exists on primary: $output"
 }

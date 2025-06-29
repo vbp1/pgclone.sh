@@ -21,6 +21,7 @@ teardown() { stop_test_env; network_rm; }
     --primary-pgdata /var/lib/postgresql/data \
     --replica-pgdata /var/lib/postgresql/data \
     --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --slot \
     --verbose \
   > /tmp/pgclone.log 2>&1 &  
   '
@@ -31,6 +32,7 @@ teardown() { stop_test_env; network_rm; }
     --primary-pgdata /var/lib/postgresql/data \
     --replica-pgdata /var/lib/postgresql/data \
     --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --slot \
     --verbose"
   assert_failure
   assert_output --partial "Another pgclone is running"
@@ -44,13 +46,17 @@ teardown() { stop_test_env; network_rm; }
     pgclone --pghost pg-primary --pguser postgres \
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/replica1 \
-      --ssh-key /tmp/id_rsa --ssh-user postgres --verbose" &
+      --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --slot \
+      --verbose" &
   sleep 2
   docker exec -u postgres "$REPLICA" bash -c "export PGPASSWORD=postgres; \
     pgclone --pghost pg-primary --pguser postgres \
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/replica2 \
-      --ssh-key /tmp/id_rsa --ssh-user postgres --verbose" &
+      --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --slot \
+      --verbose" &
   wait
 
   # basic artefact check

@@ -7,7 +7,7 @@
 ## Features
 
 - **Physical replication only** (PostgreSQL 15+)
-- No replication slot needed for `pg_receivewal`
+- Optional temporary replication slot may be created for `pg_receivewal` (`--slot` flag)
 - **Parallel database sync via rsync+rsyncd**
 - Streaming WAL with `pg_receivewal`
 - Automated testing/demo via Docker (`docker-test.sh`)
@@ -53,6 +53,7 @@ export PGDATABASE=dbname
     --primary-pgdata /var/lib/postgresql/data  \
     --replica-pgdata /var/lib/postgresql/data  \
     --temp-waldir /tmp/pg_wal \
+    --slot \
     --ssh-key /path/to/id_rsa \
     --ssh-user root \
     --parallel 4    \
@@ -68,6 +69,7 @@ export PGDATABASE=dbname
 - `--ssh-user`         — SSH user
 - `--parallel`         — number of parallel rsync jobs
 - `--temp-waldir`      - temporary directory for storing WAL files streamed by `pg_receivewal` during the clone.  After the copy is finished, all files from this directory are moved to the replica's `pg_wal` directory. This ensures no WAL segment is lost or overwritten during the initial sync.
+- `--slot`             — create and use an ephemeral physical replication slot (`pgclone_<pid>`). The slot is automatically dropped on completion or if the script terminates abnormally.
 
 
 **Note:**  
@@ -154,4 +156,6 @@ git submodule update --init --recursive
    * Moves WAL files to the final `pg_wal`, renames any `.partial`, recreates empty runtime directories, and sets secure permissions.
 
 > **Result:** A ready-to-start physical replica seeded while the primary stayed online, with live WAL streaming, parallel file copy, and built-in fault-tolerance.
+
+An optional transient replication slot is created and dropped by the `pg_receivewal` utility itself (`--create-slot/--drop-slot`) and is automatically cleaned up when the script finishes (even on failure).
 

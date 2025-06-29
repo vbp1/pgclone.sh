@@ -18,6 +18,7 @@ teardown() { stop_test_env; network_rm; }
     --primary-pgdata /var/lib/postgresql/data \
     --replica-pgdata /var/lib/postgresql/data \
     --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --slot \
     --verbose"
   assert_failure
   assert_output --partial "PGPASSWORD env variable is required"
@@ -36,6 +37,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --slot \
       --verbose"
   assert_failure
   assert_output --partial "PostgreSQL >= 15 required"
@@ -63,6 +65,7 @@ teardown() { stop_test_env; network_rm; }
         --primary-pgdata /var/lib/postgresql/data \
         --replica-pgdata /var/lib/postgresql/data \
         --ssh-key /tmp/id_rsa --ssh-user postgres \
+        --slot \
         --verbose"
   assert_failure
   assert_output --partial "SSH test failed"
@@ -93,6 +96,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --slot \
       --verbose"
   assert_failure
   assert_output --partial "Insufficient disk space"
@@ -109,6 +113,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --slot \
       --verbose"
   run start_pg_on_replica
   assert_success
@@ -117,6 +122,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --slot \
       --verbose"
   assert_failure
   assert_output --partial "Seems like PostgreSQL instance already running or stale postmaster.pid has found"
@@ -132,6 +138,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --slot \
       --verbose"
   assert_failure
   assert_output --partial "This script must not be run as root"
@@ -152,6 +159,7 @@ teardown() { stop_test_env; network_rm; }
       --primary-pgdata /var/lib/postgresql/data \
       --replica-pgdata /var/lib/postgresql/data \
       --ssh-key /tmp/id_rsa --ssh-user postgres \
+      --slot \
       --verbose"
   assert_failure
   assert_output --partial "permission denied for function pg_backup_start"

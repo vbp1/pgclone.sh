@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pgclone: prepares a PostgreSQL physical replica by syncing from primary
 # REQUIREMENT: Only supports physical replication, PostgreSQL 15+
-# NOTE: Replication slot is NOT used for pg_receivewal
+# NOTE: Can optionally use a transient replication slot for pg_receivewal (see --slot)
 
 set -euo pipefail
 
@@ -15,6 +15,10 @@ TEMP_WALDIR=""              # Temporary directory where pg_receivewal stores inc
                             # empty ⇒ auto-create under /tmp
 PARALLEL=4                  # Number of simultaneous rsync workers for base/tablespace copy
 VERBOSE=0                   # 1 = print detailed progress/debug logs, 0 = quiet
+
+# replication slot option (disabled by default)
+USE_SLOT=0                  # 1 = create temporary replication slot, 0 = disabled
+SLOT_NAME=""               # Assigned when USE_SLOT=1
 
 RSYNCD_PORT_RANGE="45000..45100"   # Port range to search for a free TCP port when
                                    # starting the transient rsync daemon on the primary
@@ -108,6 +112,14 @@ cleanup() {
         if flock -n 200; then
             rm -f "$LOCK_FILE"
         fi
+    fi
+
+    # Drop temporary replication slot if it was created
+    if [[ "$USE_SLOT" == "1" && -n "${SLOT_NAME:-}" ]]; then
+        log "Dropping replication slot $SLOT_NAME via pg_receivewal..."
+        PGPASSWORD="$PGPASSWORD" pg_receivewal \
+            --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
+            --no-password --drop-slot --slot="$SLOT_NAME" >/dev/null 2>&1 || true
     fi
 
     # Remove run-scoped temporary directory entirely
@@ -381,6 +393,7 @@ Usage: pgclone [OPTIONS]
   --ssh-user         SSH user (login on primary host)
   --temp-waldir      Temporary WAL directory
   --parallel         Number of parallel rsync jobs (default 4)
+  --slot             Use a temporary physical replication slot (auto-named, disabled by default)
   --verbose          Verbose output
   -v, --version      Print version and exit
   -h, --help         Show this help and exit
@@ -420,6 +433,7 @@ while getopts ':hv-:' opt; do
                 ssh-user)         ;;
                 temp-waldir)      ;;
                 parallel)         ;;
+                slot)             needs_arg=0 ;;
                 *) fatal "Unknown option --$long" ;;
             esac
 
@@ -443,6 +457,7 @@ while getopts ':hv-:' opt; do
                 ssh-user)         SSH_USER="$val" ;;
                 temp-waldir)      TEMP_WALDIR="$val" ;;
                 parallel)         PARALLEL="$val" ;;
+                slot)             USE_SLOT=1 ;;
             esac
             ;;
         h) show_help=1    ;;
@@ -563,16 +578,32 @@ ver=$(psql_wait | tr -d '[:space:]')
 
 # ==== Start pg_receivewal (no slot) ====
 PG_RCV_APPNAME="pgclone-$$"      # unique application_name for this run
-log "Starting pg_receivewal (appname=$PG_RCV_APPNAME, no slot)..."
-if [[ "$VERBOSE" == "1" ]]; then
-    pg_rwal_args+=(--verbose)
+
+# Configure replication slot if requested
+if [[ "$USE_SLOT" == "1" ]]; then
+    SLOT_NAME="pgclone_$$"
+    # Create the slot via pg_receivewal utility (doc: it exits immediately after creating)
+    log "Creating replication slot $SLOT_NAME via pg_receivewal..."
+    PGPASSWORD="$PGPASSWORD" pg_receivewal \
+        --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
+        --no-password --create-slot --if-not-exists --slot="$SLOT_NAME" >/dev/null 2>&1
+
+    pg_rwal_slot_args=(--slot="$SLOT_NAME")
+    log "Starting pg_receivewal (appname=$PG_RCV_APPNAME, slot=$SLOT_NAME)..."
 else
-    pg_rwal_args+=()
+    pg_rwal_slot_args=()
+    log "Starting pg_receivewal (appname=$PG_RCV_APPNAME, no slot)..."
 fi
+
+# Build additional arguments for pg_receivewal
+pg_rwal_args=()
+[[ "$VERBOSE" == "1" ]] && pg_rwal_args+=(--verbose)
+
 find "$TEMP_WALDIR" -mindepth 1 -delete
 PGAPPNAME="$PG_RCV_APPNAME" pg_receivewal \
     --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
     --no-password --directory="$TEMP_WALDIR" \
+    "${pg_rwal_slot_args[@]}" \
     "${pg_rwal_args[@]}" >"$TEMP_WALDIR/pg_receivewal.log" 2>&1 &
 PG_RECEIVEWAL_PID=$!
 sleep 3

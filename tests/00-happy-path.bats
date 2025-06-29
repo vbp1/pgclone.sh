@@ -4,6 +4,8 @@ load 'test_helper/bats-support/load'
 load 'test_helper/bats-assert/load'
 load 'common.sh'
 
+teardown() { stop_test_env; network_rm; }
+
 @test "Happy-path on PG15/16/17" {
   for v in 15 16 17; do
     build_image "$v"

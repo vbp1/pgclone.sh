@@ -37,6 +37,7 @@ teardown() { stop_test_env; network_rm; }
       pgclone --pghost pg-primary --pguser postgres \
         --primary-pgdata '/var/lib/postgresql/data dir' \
         --replica-pgdata /var/lib/postgresql/data \
+        --slot \
         --ssh-key /tmp/id_rsa --ssh-user postgres \
         --verbose"
   assert_success
