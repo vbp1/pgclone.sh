@@ -90,3 +90,71 @@ teardown() { stop_test_env; network_rm; }
   sleep 3
   check_clean
 }
+
+# ------------------------------------------------------------------------------
+# E-2 – SIGINT to pgclone cleans up all rsync workers
+# ------------------------------------------------------------------------------
+@test "SIGINT triggers rsync workers cleanup" {
+  start_primary 15; start_replica 15
+
+docker exec -u postgres "$REPLICA" bash -c '
+    set -euo pipefail
+    cat > /tmp/rsync <<'EOF'
+#!/usr/bin/env bash
+# Only stub the parallel worker calls (--relative --inplace)
+# Everything else (initial sync, --list-only) goes to real rsync
+if [[ "\$*" == *"--relative"* && "\$*" == *"--inplace"* ]]; then
+  while true; do echo test; sleep 1; done
+else
+  exec /usr/bin/rsync "\$@"
+fi
+EOF
+    chmod +x /tmp/rsync
+    export PATH="/tmp:$PATH"
+    export PGPASSWORD=postgres
+    pgclone \
+        --pghost pg-primary \
+        --pguser postgres \
+        --primary-pgdata /var/lib/postgresql/data \
+        --replica-pgdata /var/lib/postgresql/data \
+        --ssh-key /tmp/id_rsa \
+        --ssh-user postgres \
+        --insecure-ssh \
+        --parallel 4 \
+        --slot \
+        --verbose > /tmp/pgclone.log 2>&1 &
+    echo $! > /tmp/pgclone.pid
+    wait
+    ' &
+
+  # Wait until at least one rsync worker appears, then kill pgclone main script
+  docker exec "$REPLICA" bash -c '
+  for i in {1..30}; do
+    if pgrep -f "rsync .*-a --relative --inplace" | grep -v $$ >/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  if pgrep -f "rsync .*-a --relative --inplace"| grep -v $$ >/dev/null; then
+    pid_to_kill=$(pgrep -f "rsync .*-a --relative --inplace" | grep -v $$ | head -n1)
+    kill -TERM $(cat /tmp/pgclone.pid)
+  else
+    echo "no rsync procs found" >&2
+    exit 1
+  fi
+'
+
+  # Wait until pgclone exits
+  docker exec "$REPLICA" bash -c '
+  for i in {1..60}; do
+    if ! kill -0 $(cat /tmp/pgclone.pid) 2>/dev/null; then
+      exit 0
+    fi
+    sleep 1
+  done
+  echo "pgclone did not stop in 60s" >&2
+  exit 1
+'
+
+  check_clean
+} 

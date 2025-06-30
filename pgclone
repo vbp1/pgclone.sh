@@ -107,7 +107,7 @@ cleanup() {
     # Drop temporary replication slot if it was created
     if [[ "$USE_SLOT" == "1" && -n "${SLOT_NAME:-}" ]]; then
         log "Dropping replication slot $SLOT_NAME via pg_receivewal..."
-        PGPASSWORD="$PGPASSWORD" pg_receivewal \
+        pg_receivewal \
             --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
             --no-password --drop-slot --slot="$SLOT_NAME" >/dev/null 2>&1 || true
     fi
@@ -347,6 +347,12 @@ parallel_rsync_module() {
     mapfile -t parts < <(ls "${part_prefix}"*)
     pids=()
     for idx in "${!parts[@]}"; do
+        # Skip empty file lists – no files assigned to this worker
+        if [[ ! -s "${parts[$idx]}" ]]; then
+            log "[rsync] Worker $((idx+1)) skipped: empty file list"
+            continue
+        fi
+
         local logfile
         logfile=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_rsync_"${module}"_"${idx}".XXXXXX)
         RSYNC_LOGFILES+=("$logfile")
@@ -527,7 +533,22 @@ log "Using run temp directory $RUN_TMPDIR"
 : "${REPLICA_PGDATA:?--replica-pgdata required}"
 : "${SSH_KEY:?--ssh-key required}"
 : "${SSH_USER:?--ssh-user required}"
-[[ -z "${PGPASSWORD:-}" ]] && fatal "PGPASSWORD env variable is required"
+
+# --- Authentication check ---------------------------------------------
+# Accept either explicit PGPASSWORD or a readable ~/.pgpass file.
+# If both are present, the env-var wins (standard libpq precedence).
+# -----------------------------------------------------------------------
+if [[ -z "${PGPASSWORD:-}" ]]; then
+    if [[ -r "$HOME/.pgpass" ]]; then
+        log "Using password from ~/.pgpass"
+    else
+        fatal "Authentication required: set PGPASSWORD or create readable ~/.pgpass"
+    fi
+else
+    export PGPASSWORD          # make it visible to subprocesses
+    log "Using password from PGPASSWORD env variable (overrides ~/.pgpass)"
+fi
+
 [[ "$PGPORT"    =~ ^[0-9]+$ ]] || fatal "Invalid port"
 [[ "$PARALLEL"  =~ ^[0-9]+$ ]] || fatal "Invalid parallel"
 
@@ -614,7 +635,7 @@ PSQL_IN="$tmp_psql_dir/in"
 PSQL_OUT="$tmp_psql_dir/out"
 mkfifo "$PSQL_IN" "$PSQL_OUT"
 
-PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" \
+psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" \
     -w -X -A -t -v ON_ERROR_STOP=1 <"$PSQL_IN" >"$PSQL_OUT" &
 PSQL_PID=$!
 exec 3>"$PSQL_IN"
@@ -635,7 +656,7 @@ if [[ "$USE_SLOT" == "1" ]]; then
     SLOT_NAME="pgclone_$$"
     # Create the slot via pg_receivewal utility (doc: it exits immediately after creating)
     log "Creating replication slot $SLOT_NAME via pg_receivewal..."
-    PGPASSWORD="$PGPASSWORD" pg_receivewal \
+    pg_receivewal \
         --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
         --no-password --create-slot --if-not-exists --slot="$SLOT_NAME" >/dev/null 2>&1
 
@@ -907,8 +928,7 @@ wait_and_kill_process "$PSQL_PID" "persistent psql session"
 # for STOP_LSN and wait until that file shows up in TEMP_WALDIR.
 
 STOP_WALFILE=$(
-  PGPASSWORD="$PGPASSWORD" \
-    psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -w -X -A -t \
+  psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -w -X -A -t \
     -c "SELECT pg_walfile_name('$STOP_LSN');" | tr -d '[:space:]'
 )
 log "Waiting for WAL file $STOP_WALFILE..."

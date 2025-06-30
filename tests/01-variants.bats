@@ -193,3 +193,37 @@ SH
   assert_success
 }
 
+#
+# A-7 – Authentication via ~/.pgpass
+#
+@test "Authentication via ~/.pgpass" {
+  local pgver=15
+  build_image "$pgver"
+  network_up
+  start_primary "$pgver"
+  start_replica  "$pgver"
+
+  # prepare ~/.pgpass inside replica container and unset PGPASSWORD
+  docker exec -u postgres "$REPLICA" bash -c '
+    unset PGPASSWORD
+    echo "pg-primary:5432:*:postgres:postgres" > ~/.pgpass
+    chmod 600 ~/.pgpass
+  '
+
+  # Run pgclone without PGPASSWORD
+  run docker exec -u postgres "$REPLICA" bash -c '
+    set -euo pipefail
+    pgclone \
+      --pghost pg-primary \
+      --pguser postgres \
+      --primary-pgdata /var/lib/postgresql/data \
+      --replica-pgdata /var/lib/postgresql/data \
+      --ssh-key /tmp/id_rsa \
+      --ssh-user postgres \
+      --insecure-ssh \
+      --parallel 2 \
+      --slot \
+      --verbose
+  '
+  assert_success
+} 

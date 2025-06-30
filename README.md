@@ -81,7 +81,10 @@ export PGDATABASE=dbname
 
 
 **Note:**  
-You must set `PGPASSWORD` in the environment for database authentication.
+You must provide a password in **one** of two ways:  
+1. Set environment variable `PGPASSWORD` (takes priority).  
+2. Have a readable `~/.pgpass` file with the appropriate entry.  
+If neither is supplied the script will refuse to start.
 
 ---
 
