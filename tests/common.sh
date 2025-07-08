@@ -23,7 +23,7 @@ network_up() {
 }
 
 network_rm() {
-  docker network inspect "$NETWORK" &>/dev/null || docker network rm "$NETWORK"
+  docker network inspect "$NETWORK" &>/dev/null && docker network rm "$NETWORK"
 }
 
 start_primary() {
