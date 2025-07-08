@@ -10,7 +10,7 @@
 - Optional temporary replication slot may be created for `pg_receivewal` (`--slot` flag)
 - **Parallel database sync via rsync+rsyncd**
 - Streaming WAL with `pg_receivewal`
-- Automated testing/demo via Docker (`docker-test.sh`)
+- Automated testing/demo via Docker (`demo.sh`)
 - Debug-friendly flags: `--debug` (shell trace) and `--keep-run-tmp` (preserve temp files)
 - Can wipe an existing replica directory with `--drop-existing`
 
