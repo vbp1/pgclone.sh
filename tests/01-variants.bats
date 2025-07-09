@@ -97,9 +97,14 @@ SH
       --parallel 4 \
       --verbose"
   assert_success
-  docker exec -u postgres "$REPLICA" test -L /var/lib/postgresql/data/pg_wal          # symlink
-  docker exec -u postgres "$REPLICA" bash -c "test \"\$(readlink -f /var/lib/postgresql/data/pg_wal)\" = \"$REPLICA_WALDIR_CUSTOM\""
-  docker exec -u postgres "$REPLICA" find "$REPLICA_WALDIR_CUSTOM" -type f -print -quit | grep -q .
+
+  run  docker exec -u postgres "$REPLICA" test -L /var/lib/postgresql/data/pg_wal          # symlink
+  assert_success
+  run docker exec -u postgres "$REPLICA" bash -c "test \"\$(readlink -f /var/lib/postgresql/data/pg_wal)\" = \"$REPLICA_WALDIR_CUSTOM\""
+  assert_success
+  run docker exec -u postgres "$REPLICA" find "$REPLICA_WALDIR_CUSTOM" -type f -print -quit
+  assert_success
+  [[ -n "$output" ]]
 }
 
 #
@@ -128,7 +133,8 @@ SH
       --verbose"
   assert_success
   # directory exists but must be empty
-  docker exec -u postgres "$REPLICA" bash -c '[[ $(find /tmp/my_temp_wal -mindepth 1 | wc -l) -eq 0 ]]'
+  run docker exec -u postgres "$REPLICA" bash -c '[[ $(find /tmp/my_temp_wal -mindepth 1 | wc -l) -eq 0 ]]'
+  assert_success
 }
 
 #

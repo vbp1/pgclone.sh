@@ -265,9 +265,9 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# B-10 – pg_receivewal watchdog aborts on streaming stop
+# B-10 – pg_receivewal failure
 # ------------------------------------------------------------------------------
-@test "pg_receivewal watchdog aborts on streaming stop" {
+@test "pg_receivewal failure" {
   start_primary 15; start_replica 15
 
   docker exec -u postgres "$REPLICA" bash -c '
@@ -293,9 +293,8 @@ EOF
     exit 1
   '
 
-  PGW_PID=$(docker exec "$REPLICA" pgrep -f '^pg_receivewal' | head -n1)
+  PGW_PID=$(docker exec "$REPLICA" pgrep -f 'pg_receivewal' | head -n1)
   docker exec "$REPLICA" kill -9 "$PGW_PID"
-  docker exec "$REPLICA" touch /tmp/continue
 
   docker exec -u postgres "$REPLICA" bash -c '
     for i in {1..30}; do
@@ -315,9 +314,9 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# B-11 – psql watchdog aborts on session exit
+# B-11 – psql failure
 # ------------------------------------------------------------------------------
-@test "psql watchdog aborts on session exit" {
+@test "psql failure" {
   start_primary 15; start_replica 15
 
   docker exec -u postgres "$REPLICA" bash -c '
@@ -345,7 +344,6 @@ EOF
 
   PSQL_PID=$(docker exec "$REPLICA" pgrep -f "psql .*ON_ERROR_STOP=1" | head -n1)
   docker exec "$REPLICA" kill -9 "$PSQL_PID"
-  docker exec "$REPLICA" touch /tmp/continue
 
   docker exec -u postgres "$REPLICA" bash -c '
     for i in {1..30}; do
