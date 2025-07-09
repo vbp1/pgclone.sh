@@ -42,14 +42,17 @@ teardown() { stop_test_env; network_rm; }
         --insecure-ssh \
         --verbose"
   assert_success
-  docker exec -u postgres "$REPLICA" test -f /var/lib/postgresql/data/backup_label
-  docker exec -u postgres "$REPLICA" test -f /var/lib/postgresql/data/PG_VERSION
+  run docker exec -u postgres "$REPLICA" test -f /var/lib/postgresql/data/backup_label
+  assert_success
+  run docker exec -u postgres "$REPLICA" test -f /var/lib/postgresql/data/PG_VERSION
+  assert_success
 }
 
 @test "replica_waldir == subdir of pgdata (default)" {
   start_primary 15; start_replica 15
   run_pgclone
-  docker exec -u postgres "$REPLICA" test ! -L /var/lib/postgresql/data/pg_wal   # should be a dir, not symlink
+  run docker exec -u postgres "$REPLICA" test ! -L /var/lib/postgresql/data/pg_wal   # should be a dir, not symlink
+  assert_success
 }
 
 @test "garbage in TEMP_WALDIR" {
@@ -57,10 +60,11 @@ teardown() { stop_test_env; network_rm; }
   # inject dummy partial
   docker exec -u postgres "$REPLICA" bash -c "mkdir -p /tmp/pg_wal && touch /tmp/pg_wal/000000010000000000007777"
   run_pgclone
-  docker exec -u postgres "$REPLICA" bash -c '
+  run docker exec -u postgres "$REPLICA" bash -c '
     if [ -f /var/lib/postgresql/data/pg_wal/000000010000000000007777 ]; then \
        echo "file /var/lib/postgresql/data/pg_wal/000000010000000000007777 exists"; \
        exit 1; \
     fi
   '
+  assert_success
 }

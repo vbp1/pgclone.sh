@@ -263,3 +263,101 @@ EOF
 
   check_clean
 }
+
+# ------------------------------------------------------------------------------
+# B-10 – pg_receivewal failure
+# ------------------------------------------------------------------------------
+@test "pg_receivewal failure" {
+  start_primary 15; start_replica 15
+
+  docker exec -u postgres "$REPLICA" bash -c '
+  export PGPASSWORD=postgres
+  sed "/^# TEST_stop_point_1/a echo \$\$ > /tmp/pgclone.pid; while [ ! -f /tmp/continue ]; do sleep 1; done" /usr/bin/pgclone > /tmp/pgclone.debug &&
+  chmod +x /tmp/pgclone.debug &&
+  /tmp/pgclone.debug \
+    --pghost pg-primary \
+    --pguser postgres \
+    --primary-pgdata /var/lib/postgresql/data \
+    --replica-pgdata /var/lib/postgresql/data \
+    --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --insecure-ssh \
+    --verbose > /tmp/pgclone.log 2>&1; echo $? > /tmp/exit_code
+  ' &
+
+  docker exec -u postgres "$REPLICA" bash -c '
+    for i in {1..30}; do
+      [ -f /tmp/pgclone.pid ] && exit 0
+      sleep 1
+    done
+    echo "pgclone.pid not found" >&2
+    exit 1
+  '
+
+  PGW_PID=$(docker exec "$REPLICA" pgrep -f 'pg_receivewal' | head -n1)
+  docker exec "$REPLICA" kill -9 "$PGW_PID"
+
+  docker exec -u postgres "$REPLICA" bash -c '
+    for i in {1..30}; do
+      [ -f /tmp/exit_code ] && exit 0
+      sleep 1
+    done
+    cat /tmp/pgclone.log
+    echo "pgclone did not exit" >&2
+    exit 1
+  '
+
+  run docker exec -u postgres "$REPLICA" cat /tmp/exit_code
+  [ "$status" -eq 0 ]
+  [ "$output" -ne 0 ]
+
+  check_clean
+}
+
+# ------------------------------------------------------------------------------
+# B-11 – psql failure
+# ------------------------------------------------------------------------------
+@test "psql failure" {
+  start_primary 15; start_replica 15
+
+  docker exec -u postgres "$REPLICA" bash -c '
+  export PGPASSWORD=postgres
+  sed "/^# TEST_stop_point_1/a echo \$\$ > /tmp/pgclone.pid; while [ ! -f /tmp/continue ]; do sleep 1; done" /usr/bin/pgclone > /tmp/pgclone.debug &&
+  chmod +x /tmp/pgclone.debug &&
+  /tmp/pgclone.debug \
+    --pghost pg-primary \
+    --pguser postgres \
+    --primary-pgdata /var/lib/postgresql/data \
+    --replica-pgdata /var/lib/postgresql/data \
+    --ssh-key /tmp/id_rsa --ssh-user postgres \
+    --insecure-ssh \
+    --verbose > /tmp/pgclone.log 2>&1; echo $? > /tmp/exit_code
+  ' &
+
+  docker exec -u postgres "$REPLICA" bash -c '
+    for i in {1..30}; do
+      [ -f /tmp/pgclone.pid ] && exit 0
+      sleep 1
+    done
+    echo "pgclone.pid not found" >&2
+    exit 1
+  '
+
+  PSQL_PID=$(docker exec "$REPLICA" pgrep -f "psql .*ON_ERROR_STOP=1" | head -n1)
+  docker exec "$REPLICA" kill -9 "$PSQL_PID"
+
+  docker exec -u postgres "$REPLICA" bash -c '
+    for i in {1..30}; do
+      [ -f /tmp/exit_code ] && exit 0
+      sleep 1
+    done
+    cat /tmp/pgclone.log
+    echo "pgclone did not exit" >&2
+    exit 1
+  '
+
+  run docker exec -u postgres "$REPLICA" cat /tmp/exit_code
+  [ "$status" -eq 0 ]
+  [ "$output" -ne 0 ]
+
+  check_clean
+}

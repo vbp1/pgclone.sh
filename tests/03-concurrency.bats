@@ -64,6 +64,8 @@ teardown() { stop_test_env; network_rm; }
   wait
 
   # basic artefact check
-  docker exec -u postgres "$REPLICA" test -f /var/lib/postgresql/replica1/backup_label
-  docker exec -u postgres "$REPLICA" test -f /var/lib/postgresql/replica2/backup_label
+  run docker exec -u postgres "$REPLICA" test -f /var/lib/postgresql/replica1/backup_label
+  assert_success
+  run docker exec -u postgres "$REPLICA" test -f /var/lib/postgresql/replica2/backup_label
+  assert_success
 }

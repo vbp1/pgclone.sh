@@ -23,7 +23,7 @@ network_up() {
 }
 
 network_rm() {
-  docker network inspect "$NETWORK" &>/dev/null && docker network rm "$NETWORK"
+  docker network rm -f "$NETWORK"
 }
 
 start_primary() {
@@ -105,7 +105,7 @@ start_pg_on_replica() {
 }
 
 stop_test_env() {
-  docker rm -f --volumes "${_TEST_CONTAINERS[@]}" &>/dev/null || true
+  docker rm -f --volumes "${_TEST_CONTAINERS[@]}"
   _TEST_CONTAINERS=()
 }
 
