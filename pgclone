@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="1.0.1"
+PGCLONE_VERSION="1.1.0"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -52,6 +52,8 @@ RSYNCD_WATCHDOG_PID=""
 PSQL_WATCHDOG_PID=""
 RSYNC_LOGFILES=()
 RUN_TMPDIR=""
+PIDFILE=""
+PGCLONE_MAIN_PID=""
 
 # ==== Logging ====
 log() { [[ "$VERBOSE" == "1" ]] && echo "[$(date '+%F %T')] [pgclone] $*" >&2; return 0; }
@@ -62,9 +64,25 @@ fatal() { err "$@"; exit 1; }
 # shellcheck disable=SC2317
 cleanup() {
     rc=$?
+    reason="$1"
+
     [[ "$CLEANUP_DONE" == "1" ]] && exit "$rc"
     CLEANUP_DONE=1
+
+    if [[ "$reason" != "EXIT" ]]; then
+        if [[ "$rc" == "0" ]]; then
+            rc=1
+        fi
+        log "$reason received, cleaning up and exiting with rc=$rc"
+    fi
+
     log "Running cleanup (rc=$rc)..."
+
+    # Stop pg_receivewal watchdog
+    if [[ -n "${PG_RECEIVEWAL_WATCHDOG_PID:-}" ]]; then
+        kill "$PG_RECEIVEWAL_WATCHDOG_PID" 2>/dev/null || true
+        wait_and_kill_process "$PG_RECEIVEWAL_WATCHDOG_PID" "pg_receivewal watchdog"
+    fi
 
     # Stop pg_receivewal
     if [[ -n "${PG_RECEIVEWAL_PID:-}" ]]; then
@@ -73,11 +91,6 @@ cleanup() {
         wait_and_kill_process "$PG_RECEIVEWAL_PID" "pg_receivewal"
     fi
 
-    # Stop pg_receivewal watchdog
-    if [[ -n "${PG_RECEIVEWAL_WATCHDOG_PID:-}" ]]; then
-        kill "$PG_RECEIVEWAL_WATCHDOG_PID" 2>/dev/null || true
-        wait_and_kill_process "$PG_RECEIVEWAL_WATCHDOG_PID" "pg_receivewal watchdog"
-    fi
     # Stop rsyncd on master via ssh PID
     if [[ -n "${RSYNCD_SSH_PID:-}" ]]; then
         log "Stopping rsyncd (via SSH PID=$RSYNCD_SSH_PID)..."
@@ -148,7 +161,12 @@ cleanup() {
     log "Cleanup complete (rc=$rc)"
     exit "$rc"
 }
-trap cleanup EXIT INT TERM ERR
+
+trap 'cleanup EXIT' EXIT
+trap 'cleanup TERM' TERM
+trap 'cleanup INT' INT
+trap 'cleanup ERR' ERR
+
 
 # ==== Helpers ====
 
@@ -531,6 +549,10 @@ fi
 # All per-run temporary files/subdirs are created under this directory to simplify cleanup.
 RUN_TMPDIR=$(mktemp -d -t pgclone_.XXXXXX)
 log "Using run temp directory $RUN_TMPDIR"
+PIDFILE="$RUN_TMPDIR/pgclone.pid"
+PGCLONE_MAIN_PID="$$"
+echo $PGCLONE_MAIN_PID > "$PIDFILE"
+
 
 # ==== Validate ====
 : "${PGHOST:?--pghost required}"
@@ -648,15 +670,21 @@ exec 3>"$PSQL_IN"
 psql_send() { echo "$1" >&3; }
 psql_wait() { grep -m 1 . <"$PSQL_OUT"; }
 
-# Watchdog: terminate main script if psql session exits
+# Watchdog: terminate main script if psql session exits,
+#           terminate psql if main script dies.
 (
     child_pid=$PSQL_PID
-    main_pid=$PPID
+    main_pid=$PGCLONE_MAIN_PID
     while kill -0 "$child_pid" 2>/dev/null && kill -0 "$main_pid" 2>/dev/null; do
         sleep 1
     done
-    kill -0 "$main_pid" 2>/dev/null || exit 0
-    log "[watchdog] psql session PID=$child_pid exited"
+    if ! kill -0 "$main_pid" 2>/dev/null; then
+        log "[psql_watchdog] Main process $main_pid died -> terminating psql PID=$child_pid"
+        watchdog_terminate "$child_pid" "psql"
+        exit 0
+    fi
+    log "[psql_watchdog] psql session PID=$child_pid exited"
+    log "[psql_watchdog] Terminating main process $main_pid"
     kill -TERM "$main_pid" 2>/dev/null
 ) &
 PSQL_WATCHDOG_PID=$!
@@ -705,17 +733,18 @@ fi
 
 # ==== Watchdog for pg_receivewal ====
 (
-    child_pid=$PG_RECEIVEWAL_PID       # pid of pg_receivewal
-    main_pid=$PPID                     # pid of the main script
+    child_pid=$PG_RECEIVEWAL_PID
+    main_pid=$PGCLONE_MAIN_PID
     while kill -0 "$child_pid" 2>/dev/null && kill -0 "$main_pid" 2>/dev/null; do
         sleep 1
     done
     if ! kill -0 "$main_pid" 2>/dev/null; then
-        log "[watchdog] Main process $main_pid died -> terminating pg_receivewal PID=$child_pid"
+        log "[pg_receivewal_watchdog] Main process $main_pid died -> terminating pg_receivewal PID=$child_pid"
         watchdog_terminate "$child_pid" "pg_receivewal"
         exit 0
     fi
-    log "[watchdog] pg_receivewal PID=$child_pid exited"
+    log "[pg_receivewal_watchdog] pg_receivewal PID=$child_pid exited"
+    log "[pg_receivewal_watchdog] Terminating main process $main_pid"
     kill -TERM "$main_pid" 2>/dev/null
 ) &
 PG_RECEIVEWAL_WATCHDOG_PID=$!
@@ -829,7 +858,7 @@ RSYNCD_SSH_PID=$!
     while kill -0 "$main_pid" 2>/dev/null; do
         sleep 1
     done
-    log "[watchdog] Main process $main_pid died -> terminating rsyncd-ssh PID=$RSYNCD_SSH_PID"
+    log "[rsyncd_watchdog] Main process $main_pid died -> terminating rsyncd-ssh PID=$RSYNCD_SSH_PID"
     watchdog_terminate "$RSYNCD_SSH_PID" "rsyncd ssh session"
 ) &
 RSYNCD_WATCHDOG_PID=$!
@@ -941,11 +970,13 @@ ssh_exec "cat $(shquote "$PRIMARY_PGDATA")/global/pg_control" \
 log "Backup stopped at LSN $STOP_LSN and control files written"
 
 log "Closing persistent psql session..."
-psql_send '\q'
-wait_and_kill_process "$PSQL_PID" "persistent psql session"
+# Terminate psql watchdog first, because it may be waiting for psql session to exit.
 kill -TERM "$PSQL_WATCHDOG_PID" 2>/dev/null || true
 wait_and_kill_process "$PSQL_WATCHDOG_PID" "psql watchdog"
 PSQL_WATCHDOG_PID=""
+# Then terminate psql session
+psql_send '\q'
+wait_and_kill_process "$PSQL_PID" "persistent psql session"
 
 # We must be certain the WAL segment that contains STOP_LSN is present on the replica
 # *before* we stop pg_receivewal.  Otherwise the standby will ask for that segment
@@ -974,10 +1005,12 @@ log "WAL $STOP_WALFILE received"
 # before we move them to the final WAL directory.
 log "Stopping pg_receivewal..."
 if kill -0 "$PG_RECEIVEWAL_PID" 2>/dev/null; then
-    kill -TERM "$PG_RECEIVEWAL_PID" 2>/dev/null
-    wait_and_kill_process "$PG_RECEIVEWAL_PID" "pg_receivewal"
+    # Terminate pg_receivewal watchdog first, because it may be waiting for pg_receivewal to exit.
     kill -TERM "$PG_RECEIVEWAL_WATCHDOG_PID" 2>/dev/null
     wait_and_kill_process "$PG_RECEIVEWAL_WATCHDOG_PID" "pg_receivewal watchdog"
+    # Then terminate pg_receivewal
+    kill -TERM "$PG_RECEIVEWAL_PID" 2>/dev/null
+    wait_and_kill_process "$PG_RECEIVEWAL_PID" "pg_receivewal"
 fi
 # We stops pg_receivewal and its watchdog here, so we should not do it on cleanup.
 PG_RECEIVEWAL_PID=""
