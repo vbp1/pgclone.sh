@@ -10,3 +10,8 @@ tests/test_helper/*
 .bats-tmp/
 *.log
 *.tmp
+# cursor files
+.cursor/
+# claude files
+CLAUDE.md
+.mcp.json
