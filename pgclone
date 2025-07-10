@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="1.1.0"
+PGCLONE_VERSION="1.1.1"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -63,11 +63,15 @@ fatal() { err "$@"; exit 1; }
 # ==== Cleanup ====
 # shellcheck disable=SC2317
 cleanup() {
-    rc=$?
-    reason="$1"
+    local rc=$?
+    local reason="$1"
 
-    [[ "$CLEANUP_DONE" == "1" ]] && exit "$rc"
+    [[ "$CLEANUP_DONE" == "1" ]] && return
     CLEANUP_DONE=1
+
+    # Disable further traps because we're in cleanup mode
+    trap '' TERM INT ERR
+    trap - EXIT
 
     if [[ "$reason" != "EXIT" ]]; then
         if [[ "$rc" == "0" ]]; then

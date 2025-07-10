@@ -31,7 +31,7 @@
 1. **Get the script:**
     ```bash
     cd /path/to/dir
-    curl https://raw.githubusercontent.com/vbp1/pgclone.sh/refs/heads/main/pgclone
+    wget https://raw.githubusercontent.com/vbp1/pgclone.sh/refs/heads/main/pgclone
     chmod +x ./pgclone
     ```
 

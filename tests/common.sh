@@ -163,6 +163,14 @@ check_clean() {
     fail "Leftover pgclone_* dirs on replica: $output"
   fi
 
+  # Ensure no leftover lock files (concurrent run protection)
+  run docker exec -u postgres "$REPLICA" find /tmp -maxdepth 1 -type f -name 'pgclone_*.lock'
+  if [ "$status" -eq 0 ] && [ -z "$output" ]; then
+    : # No action needed
+  else
+    fail "Leftover pgclone_*.lock files on replica: $output"
+  fi
+
   # Ensure temporary replication slot removed on primary
   run docker exec -u postgres "$PRIMARY" psql -At -c "SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE 'pgclone_%';"
   if [ "$status" -eq 0 ] && [ -z "$output" ]; then
