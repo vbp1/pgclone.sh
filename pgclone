@@ -431,26 +431,32 @@ print_usage () {
     cat <<EOF
 Usage: pgclone [OPTIONS]
 
-  --pghost           Primary host
+  --pghost           Primary host (required)
   --pgport           Primary port (default 5432)
-  --pguser           Primary user
-  --primary-pgdata   Primary PGDATA path
-  --replica-pgdata   Replica PGDATA path
-  --replica-waldir   Replica pg_wal path
-  --ssh-key          SSH private key file
-  --ssh-user         SSH user (login on primary host)
-  --temp-waldir      Temporary WAL directory
-  --parallel         Number of parallel rsync jobs (default 4)
-  --drop-existing    Remove existing data in replica pgdata and pg_wal before cloning
-  --debug            Enable bash trace (set -x) for troubleshooting
-  --keep-run-tmp     Preserve temporary run directory after completion (for debugging)
-  --slot             Use a temporary physical replication slot (auto-named, disabled by default)
-  --insecure-ssh     Disable known_hosts verification (equivalent to StrictHostKeyChecking=no) – NOT recommended
-  --verbose          Verbose output
+  --pguser           Primary user (required)
+  --primary-pgdata   Primary PGDATA path (required)
+  --replica-pgdata   Replica PGDATA path (optional, default: same as --primary-pgdata)
+  --replica-waldir   Replica pg_wal path (optional, default: <replica-pgdata>/pg_wal)
+  --ssh-key          SSH private key file (optional, auto-detected if omitted)
+  --ssh-user         SSH user (login on primary host) (required)
+  --temp-waldir      Temporary WAL directory (optional, default: system tmp)
+  --parallel         Number of parallel rsync jobs (optional, default: 4)
+  --drop-existing    Remove existing data in replica pgdata and pg_wal before cloning (optional, default: disabled)
+  --debug            Enable bash trace (set -x) for troubleshooting (optional, default: disabled)
+  --keep-run-tmp     Preserve temporary run directory after completion (for debugging) (optional, default: disabled)
+  --slot             Use a temporary physical replication slot (auto-named, disabled by default) (optional, default: disabled)
+  --insecure-ssh     Disable known_hosts verification (equivalent to StrictHostKeyChecking=no) – NOT recommended (optional, default: disabled)
+  --verbose          Verbose output (optional, default: disabled)
   -v, --version      Print version and exit
   -h, --help         Show this help and exit
 EOF
 }
+
+# Show help when called with no arguments
+if [[ $# -eq 0 ]]; then
+    print_usage
+    exit 0
+fi
 
 show_help=0
 show_version=0
@@ -558,8 +564,26 @@ echo $PGCLONE_MAIN_PID > "$PIDFILE"
 : "${PGHOST:?--pghost required}"
 : "${PGUSER:?--pguser required}"
 : "${PRIMARY_PGDATA:?--primary-pgdata required}"
-: "${REPLICA_PGDATA:?--replica-pgdata required}"
-: "${SSH_KEY:?--ssh-key required}"
+
+# Default replica PGDATA to primary if not supplied
+if [[ -z "${REPLICA_PGDATA:-}" ]]; then
+    REPLICA_PGDATA="$PRIMARY_PGDATA"
+    log "--replica-pgdata not specified, using the same path as --primary-pgdata: $REPLICA_PGDATA"
+fi
+
+# Provide default SSH key if none specified
+if [[ -z "${SSH_KEY:-}" ]]; then
+    for default_key in "$HOME/.ssh/id_rsa" "$HOME/.ssh/id_ecdsa" "$HOME/.ssh/id_ecdsa_sk" "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_ed25519_sk"; do
+        if [[ -r "$default_key" ]]; then
+            SSH_KEY="$default_key"
+            log "Using default SSH key $SSH_KEY"
+            break
+        fi
+    done
+    if [[ -z "${SSH_KEY:-}" ]]; then
+        log "No SSH key specified or auto-detected; relying on SSH agent and default ssh configuration"
+    fi
+fi
 : "${SSH_USER:?--ssh-user required}"
 
 # --- Authentication check ---------------------------------------------
@@ -583,7 +607,9 @@ fi
 TEMP_WALDIR="${TEMP_WALDIR:-$(TMPDIR="$RUN_TMPDIR" mktemp -d -t pgclone_temp.XXXXXX)}"
 REPLICA_WALDIR="${REPLICA_WALDIR:-$REPLICA_PGDATA/pg_wal}"
 
-validate_ssh_key "$SSH_KEY"
+if [[ -n "${SSH_KEY:-}" ]]; then
+    validate_ssh_key "$SSH_KEY"
+fi
 
 # Remove existing replica directories when --drop-existing is specified
 if [[ "$DROP_EXISTING" == "1" ]]; then
@@ -595,12 +621,14 @@ fi
 mkdir -p "$REPLICA_PGDATA" "$REPLICA_WALDIR" "$TEMP_WALDIR"
 
 # Build SSH options depending on security mode
+SSH_OPTS=("-o" "BatchMode=yes")
 if [[ "$INSECURE_SSH" == "1" ]]; then
-    # Disable host key verification – insecure, vulnerable to MITM
-    SSH_OPTS=("-i" "$SSH_KEY" "-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=no")
+    SSH_OPTS+=("-o" "StrictHostKeyChecking=no")
 else
-    # Enforce host key verification – fail fast if host is unknown
-    SSH_OPTS=("-i" "$SSH_KEY" "-o" "BatchMode=yes" "-o" "StrictHostKeyChecking=yes")
+    SSH_OPTS+=("-o" "StrictHostKeyChecking=yes")
+fi
+if [[ -n "${SSH_KEY:-}" ]]; then
+    SSH_OPTS+=("-i" "$SSH_KEY")
 fi
 
 # ==== Check that we are not running as root ====

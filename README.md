@@ -67,12 +67,12 @@ export PGDATABASE=dbname
 **Parameters:**
 - `--pghost`           — address of the primary server
 - `--pguser`           — user with replication and backup privileges
-- `--primary-pgdata`   — path to PGDATA on the primary
-- `--replica-pgdata`   — path to PGDATA on the replica
-- `--ssh-key`          — private SSH key
+- `--primary-pgdata`   — path to PGDATA on the primary (required)
+- `--replica-pgdata`   — path to PGDATA on the replica (optional, defaults to value of `--primary-pgdata`)
+- `--ssh-key`          — private SSH key (optional; auto-detected from `~/.ssh/id_*` or SSH agent)
 - `--ssh-user`         — SSH user
-- `--parallel`         — number of parallel rsync jobs
-- `--temp-waldir`      - temporary directory for storing WAL files streamed by `pg_receivewal` during the clone.  After the copy is finished, all files from this directory are moved to the replica's `pg_wal` directory. This ensures no WAL segment is lost or overwritten during the initial sync.
+- `--parallel`         — number of parallel rsync jobs (default: 4)
+- `--temp-waldir`      - temporary directory for storing WAL files streamed by `pg_receivewal` during the clone (optional; default: system temp dir). After the copy is finished, all files are moved to the replica's `pg_wal`, ensuring no WAL segment is lost or overwritten during the initial sync.
 - `--drop-existing`    — **dangerous**: remove any data found in the target `--replica-pgdata` and its `pg_wal` directory before starting the clone.
 - `--debug`            — run the script in *x-trace* mode (`set -x`), printing every executed command for troubleshooting.
 - `--slot`             — create and use an ephemeral physical replication slot (`pgclone_<pid>`). The slot is automatically dropped on completion or if the script terminates abnormally.
