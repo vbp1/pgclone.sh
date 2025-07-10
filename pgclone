@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="1.1.1"
+PGCLONE_VERSION="1.1.2"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -334,10 +334,12 @@ parallel_rsync_module() {
 
     for ((i=0;i<PARALLEL;i++)); do :>"${part_prefix}_$i"; done
 
-    rsync --list-only --recursive \
-          --password-file="$RSYNC_SECRET_FILE" \
-          "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" |
-          awk '$1 ~ /^-/ {gsub(/,/, "", $2); print $2 "\t" $5}' > "$file_raw"
+    # LC_ALL=C is required to ensure consistent format for numeric fields
+    # awk removes thousands separators (e.g. 1,000,000 -> 1000000)
+    LC_ALL=C rsync --list-only --recursive \
+      --password-file="$RSYNC_SECRET_FILE" \
+      "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" |
+      awk '$1 ~ /^-/ {gsub(/[.,]/, "", $2); print $2 "\t" $5}' > "$file_raw"
     sort -nr "$file_raw" > "$file_sorted"
 
     # --- Distribute files across workers (ring-hop heuristic) --------------------
@@ -362,6 +364,7 @@ parallel_rsync_module() {
     declare -a chunksize; for ((i=0;i<PARALLEL;i++)); do chunksize[i]=0; done
     cur=0
     while IFS=$'\t' read -r sz path; do
+        [[ $sz =~ ^[0-9]+$ ]] || fatal "unexpected size string \"$sz\" from rsync --list-only"
         nxt=$(( (cur+1)%PARALLEL ))
         (( chunksize[nxt] < chunksize[cur] )) && cur=$nxt
         echo "$path" >> "${part_prefix}_$cur"
