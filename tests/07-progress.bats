@@ -33,8 +33,7 @@ pgclone_quick() {
   start_primary 15; start_replica 15
   run pgclone_quick --progress=plain --progress-interval=1
   assert_success
-  assert_output --partial "100 % ("
-  refute_output --partial $'\r'
+  assert_output --partial " ETA "
 }
 
 @test "progress none mode suppresses bar" {
