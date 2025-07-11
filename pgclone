@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="1.1.2"
+PGCLONE_VERSION="1.2.0"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -326,21 +326,24 @@ format_bytes() {
     # Human-readable IEC units (up to PiB). Falls back to awk if numfmt unavailable.
     local b="$1"
     if command -v numfmt >/dev/null 2>&1; then
-        numfmt --to=iec-i --suffix="B" --format="%.1f" "$b"
+        numfmt --to=si --suffix="B" --format="%.1f" "$b"
     else
         awk -v bytes="$b" '
         function human(x) {
-            split("B KiB MiB GiB TiB PiB", u)
-            i=1; while (x>=1024 && i<6) {x/=1024; ++i} printf("%.1f %s", x, u[i])
+            split("B KB MB GB TB PB", u)
+            i=1; while (x>=1000 && i<6) {x/=1000; ++i} printf("%.1f %s", x, u[i])
         } BEGIN {human(bytes)}'
     fi
 }
 
 bytes_from_str() {
     # Convert "3.36T", "357M", "1,024" → bytes (integer). Supports K/M/G/T/P.
-    local s="${1//,/}"           # remove thousands separators
+    local s="${1,,}"            # to lowercase
+    s="${s//,/}"                # remove thousands separators
     s="${s// bytes/}"
     s="${s//byte/}"
+    s="${s// /}"                # remove spaces
+    s="${s//i/}"                # drop 'i' in KiB/MiB units
     local unit="${s: -1}"
     local num
     if [[ $unit =~ [KkMmGgTtPp] ]]; then
@@ -352,6 +355,10 @@ bytes_from_str() {
     num="${num//,/}"
     num="${num//,/}"
     local mul=1
+
+    # Return 0 if number part empty (unexpected input)
+    [[ -z "$num" ]] && { echo 0; return; }
+
     case "$unit" in
         K|k) mul=1024;;
         M|m) mul=$((1024**2));;
@@ -371,20 +378,25 @@ aggregate_rsync_stats() {
     local file_list_size=0 file_list_gen_time=0 file_list_tx_time=0
     local bytes_sent=0 bytes_received=0
 
+    # (debug logs removed)
     for lf in "${logfiles[@]}"; do
         while IFS= read -r line; do
             case "$line" in
                 "Number of files:"*)
-                    val=$(echo "$line" | awk -F: '{print $2}' | awk '{print $1}')
-                    val=${val//,/}; (( num_files += val )) ;;
+                    val=$(echo "$line" | grep -oE '[0-9]+' | head -1)
+                    [[ -z "$val" ]] && val=0
+                    (( num_files += val )) ;;
                 "Number of created files:"*)
-                    val=$(echo "$line" | awk -F: '{print $2}' | tr -d ' ,')
+                    val=$(echo "$line" | grep -oE '[0-9]+' | head -1)
+                    [[ -z "$val" ]] && val=0
                     (( created_files += val )) ;;
                 "Number of deleted files:"*)
-                    val=$(echo "$line" | awk -F: '{print $2}' | tr -d ' ,')
+                    val=$(echo "$line" | grep -oE '[0-9]+' | head -1)
+                    [[ -z "$val" ]] && val=0
                     (( deleted_files += val )) ;;
                 "Number of regular files transferred:"*)
-                    val=$(echo "$line" | awk -F: '{print $2}' | tr -d ' ,')
+                    val=$(echo "$line" | grep -oE '[0-9]+' | head -1)
+                    [[ -z "$val" ]] && val=0
                     (( reg_transferred += val )) ;;
                 "Total file size:"*)
                     val=$(echo "$line" | awk -F: '{print $2}' | awk '{print $1}')
@@ -420,7 +432,7 @@ aggregate_rsync_stats() {
                     bytes_sent=$(( bytes_sent + $(bytes_from_str "$sent") ))
                     bytes_received=$(( bytes_received + $(bytes_from_str "$recv") )) ;;
             esac
-        done < "$lf"
+        done < "$lf" || true
     done
 
     local total_bytes=$(( bytes_sent + bytes_received ))
@@ -434,20 +446,22 @@ aggregate_rsync_stats() {
     printf "Number of created files: %'d\n" "$created_files"
     printf "Number of deleted files: %'d\n" "$deleted_files"
     printf "Number of regular files transferred: %'d\n" "$reg_transferred"
-    printf "Total file size: %s bytes\n" "$(format_bytes "$total_file_size")"
-    printf "Total transferred file size: %s bytes\n" "$(format_bytes "$total_transferred_size")"
-    printf "Literal data: %s bytes\n" "$(format_bytes "$literal_data")"
-    printf "Matched data: %s bytes\n" "$(format_bytes "$matched_data")"
+    printf "Total file size: %s\n" "$(format_bytes "$total_file_size")"
+    printf "Total transferred file size: %s\n" "$(format_bytes "$total_transferred_size")"
+    printf "Literal data: %s\n" "$(format_bytes "$literal_data")"
+    printf "Matched data: %s\n" "$(format_bytes "$matched_data")"
     printf "File list size: %s\n" "$(format_bytes "$file_list_size")"
     printf "File list generation time: %.3f seconds\n" "$file_list_gen_time"
     printf "File list transfer time: %.3f seconds\n" "$file_list_tx_time"
     printf "Total bytes sent: %s\n" "$(format_bytes "$bytes_sent")"
     printf "Total bytes received: %s\n" "$(format_bytes "$bytes_received")"
     echo
-    printf "sent %s bytes  received %s bytes  %s bytes/sec\n" \
+    printf "sent %s  received %s  %s/sec\n" \
         "$(format_bytes "$bytes_sent")" \
         "$(format_bytes "$bytes_received")" \
         "$(format_bytes "$speed")"
+
+    # (debug summary removed)
 }
 
 # $1 = rsync-module, $2 = dst
@@ -551,9 +565,10 @@ parallel_rsync_module() {
                 local percent=$(( transferred * 100 / total_bytes ))
                 (( percent > 100 )) && percent=100
                 local filled=$(( percent * bar_width / 100 ))
-                printf "\r[" >&2
-                printf '#%.0s' $(seq 1 $filled) >&2
-                printf '-%.0s' $(seq 1 $(( bar_width - filled ))) >&2
+                printf '\r[' >&2
+                if (( filled > 0 )); then printf '#%.0s' $(seq 1 $filled) >&2; fi
+                local remaining=$(( bar_width - filled ))
+                if (( remaining > 0 )); then printf -- '-%.0s' $(seq 1 $remaining) >&2; fi
                 printf "] %3d %% (%s / %s)" "$percent" "$(format_bytes "$transferred")" "$(format_bytes "$total_bytes")" >&2
                 last_print=$now
             elif (( show_plain && now - last_print >= interval )); then
@@ -610,8 +625,8 @@ parallel_rsync_module() {
                   --files-from="${parts[$idx]}" \
                   --password-file="$RSYNC_SECRET_FILE" \
                   "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" "$dst/" \
-                  | while read -r sz; do echo "$sz" >"$progress_pipe"; done \
-                  2>"$logfile"
+                  | tee >(while read -r sz; do [[ "$sz" =~ ^[0-9]+$ ]] && echo "$sz" >"$progress_pipe"; done) \
+                  >>"$logfile" 2>&1
         ) &
         pids+=($!)
     done
@@ -635,19 +650,6 @@ parallel_rsync_module() {
 
     # Aggregate and print rsync statistics
     aggregate_rsync_stats "${RSYNC_LOGFILES[@]}"
-
-    # print rsync worker logs if verbose
-    if [[ "$VERBOSE" == "1" ]]; then
-        for idx in "${!RSYNC_LOGFILES[@]}"; do
-            if [[ -s "${RSYNC_LOGFILES[$idx]}" ]]; then
-                echo
-                echo "====== rsync worker $((idx + 1)) output log start ======"
-                cat  "${RSYNC_LOGFILES[$idx]}"
-                echo "====== rsync worker $((idx + 1)) output log end ======"
-                echo
-            fi
-        done
-    fi
 
     # Cleanup temporary files
     for f in "${RSYNC_LOGFILES[@]}"; do rm -f "$f"; done
