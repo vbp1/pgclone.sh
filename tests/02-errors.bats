@@ -202,7 +202,7 @@ docker exec -u postgres "$REPLICA" bash -c '
 #!/usr/bin/env bash
 # Only stub the parallel worker calls (--relative --inplace)
 # Everything else (initial sync, --list-only) goes to real rsync
-if [[ "\$*" == *"--relative"* && "\$*" == *"--inplace"* ]]; then
+if [[ "\$*" == *"--relative"* && "\$*" == *"--inplace"* && "\$*" != *"--dry-run"* ]]; then
   while true; do echo test; sleep 1; done
 else
   exec /usr/bin/rsync "\$@"
