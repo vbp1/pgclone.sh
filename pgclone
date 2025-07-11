@@ -139,7 +139,7 @@ cleanup() {
     fi
 
     # --- ensure no children processes remain -------------------
-    for cpid in $(pgrep -P $$ 2>/dev/null || true); do
+    for cpid in $(pgrep -P "$PGCLONE_MAIN_PID" 2>/dev/null || true); do
         if kill -0 "$cpid" 2>/dev/null; then
             cmd=$(ps -o comm= -p "$cpid" 2>/dev/null || true)
             log "Cleaning up child process PID=$cpid, CMD=$cmd"
@@ -617,7 +617,9 @@ parallel_rsync_module() {
         logfile=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_rsync_"${module}"_"${idx}".XXXXXX)
         RSYNC_LOGFILES+=("$logfile")
         (
-            rsync -a --relative --inplace \
+            local RSYNC_BIN
+            RSYNC_BIN=$(command -v rsync)
+            exec "$RSYNC_BIN" -a --relative --inplace \
                   --exclude 'pgsql_tmp*' \
                   --exclude 'pg_internal.init' \
                   --out-format="%l" --info=stats2 \
@@ -625,8 +627,8 @@ parallel_rsync_module() {
                   --files-from="${parts[$idx]}" \
                   --password-file="$RSYNC_SECRET_FILE" \
                   "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" "$dst/" \
-                  | tee >(while read -r sz; do [[ "$sz" =~ ^[0-9]+$ ]] && echo "$sz" >"$progress_pipe"; done) \
-                  >>"$logfile" 2>&1
+                  > >(awk -v p="$progress_pipe" -v l="$logfile" '{ if ($0 ~ /^[0-9]+$/) print > p; print >> l }') \
+                  2>>"$logfile"
         ) &
         pids+=($!)
     done
