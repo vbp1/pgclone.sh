@@ -634,7 +634,6 @@ parallel_rsync_module() {
         local logfile
         logfile=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_rsync_"${module}"_"${idx}".XXXXXX)
         RSYNC_LOGFILES+=("$logfile")
-        # shellcheck disable=SC2128,SC2129
         (
             local RSYNC_BIN
             RSYNC_BIN=$(command -v rsync)
