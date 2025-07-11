@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="1.3.0"
+PGCLONE_VERSION="1.3.1"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -13,7 +13,7 @@ REPLICA_WALDIR=""           # Destination pg_wal directory on the replica;
                             # empty ⇒ use "$REPLICA_PGDATA/pg_wal"
 TEMP_WALDIR=""              # Temporary directory where pg_receivewal stores incoming WAL;
                             # empty ⇒ auto-create under /tmp
-PARALLEL=$(( $( (getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1) ) * 2 ))  # Number of simultaneous rsync workers (CPU cores x2)
+PARALLEL=$(( $( (getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1) ) * 1 ))  # Number of simultaneous rsync workers (CPU cores)
 PARANOID=0                  # 1 = enable rsync --checksum for all copy operations
 TEMP_WALDIR_CREATED=0       # 1 = TEMP_WALDIR was auto-created and should be removed entirely
 VERBOSE=0                   # 1 = print detailed progress/debug logs, 0 = quiet
@@ -458,8 +458,8 @@ aggregate_rsync_stats() {
     printf "Literal data: %s\n" "$(format_bytes "$literal_data")"
     printf "Matched data: %s\n" "$(format_bytes "$matched_data")"
     printf "File list size: %s\n" "$(format_bytes "$file_list_size")"
-    printf "File list generation time: %.3f seconds\n" "$file_list_gen_time"
-    printf "File list transfer time: %.3f seconds\n" "$file_list_tx_time"
+    printf "File list generation time: %s seconds\n" "$file_list_gen_time"
+    printf "File list transfer time: %s seconds\n" "$file_list_tx_time"
     printf "Total bytes sent: %s\n" "$(format_bytes "$bytes_sent")"
     printf "Total bytes received: %s\n" "$(format_bytes "$bytes_received")"
     echo
@@ -528,9 +528,59 @@ parallel_rsync_module() {
         while read -r d; do mkdir -p "$dst/$d"; done
 
     # ---- total bytes for progress ----
+    # Determine how many bytes actually need to be transferred.  We perform
+    # a quick rsync dry-run that computes the exact "Total transferred file size"
+    # for this module.  This prevents the progress bar from starting at 0 %
+    # and then jumping straight to 100 % when most of the data is already
+    # present locally.
+
     local total_bytes
+
+    # Default fallback – whole remote size (may over-estimate if many files are unchanged)
     total_bytes=$(awk -F'\t' '{s+=$1} END{print s}' "$file_raw")
     [[ -z "$total_bytes" ]] && total_bytes=0
+
+    # Try to get precise amount using a dry-run.  Any failure will silently
+    # fall back to the estimate above.
+    if (( total_bytes > 0 )); then
+        local dry_log dry_bytes file_paths
+        dry_log=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_dry_"${module}".XXXXXX)
+        file_paths=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_paths_"${module}".XXXXXX)
+        awk -F'\t' '{print $2}' "$file_raw" > "$file_paths"
+
+        # First attempt: count sizes of files that will be transferred using %l format.
+        if rsync -a --dry-run --relative --inplace \
+              ${RSYNC_CHECKSUM_FLAG} \
+              --exclude 'pgsql_tmp*' \
+              --exclude 'pg_internal.init' \
+              --out-format="%l" \
+              --files-from="$file_paths" \
+              --password-file="$RSYNC_SECRET_FILE" \
+              "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" "$dst/" \
+              >"$dry_log" 2>/dev/null; then
+               dry_bytes=$(awk '/^[0-9]+$/{s+=$1} END{print s}' "$dry_log")
+        fi
+ 
+        # Fallback: parse --stats output if first method produced zero/empty.
+        if [[ -z "$dry_bytes" || ! "$dry_bytes" =~ ^[0-9]+$ || "$dry_bytes" -eq 0 ]]; then
+            rsync -a --dry-run --relative --inplace \
+                  ${RSYNC_CHECKSUM_FLAG} \
+                  --exclude 'pgsql_tmp*' \
+                  --exclude 'pg_internal.init' \
+                  --out-format="" --stats \
+                  --files-from="$file_paths" \
+                  --password-file="$RSYNC_SECRET_FILE" \
+                  "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" "$dst/" \
+                  >"$dry_log" 2>&1
+            dry_bytes_line=$(awk -F: '/Total transferred file size:/ {print $2}' "$dry_log" | awk '{print $1; exit}' | tr -d '.')
+            dry_bytes=$(bytes_from_str "$dry_bytes_line")
+        fi
+ 
+        if [[ -n "$dry_bytes" && "$dry_bytes" =~ ^[0-9]+$ && "$dry_bytes" -gt 0 ]]; then
+            total_bytes=$dry_bytes
+        fi
+        rm -f "$dry_log" "$file_paths"
+    fi
 
     if (( total_bytes == 0 )); then
         log "[rsync] Module $module: nothing to transfer (empty file list)"
@@ -636,7 +686,7 @@ parallel_rsync_module() {
                   --files-from="${parts[$idx]}" \
                   --password-file="$RSYNC_SECRET_FILE" \
                   "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" "$dst/" \
-                  > >(awk -v p="$progress_pipe" -v l="$logfile" '{ if ($0 ~ /^[0-9]+$/) print > p; print >> l }') \
+                  > >(awk -v p="$progress_pipe" -v l="$logfile" '{ if ($0 ~ /^[0-9]+$/) { print > p; fflush(p) } ; print >> l;  }') \
                   2>>"$logfile"
         ) &
         pids+=($!)
@@ -687,7 +737,7 @@ Usage: pgclone [OPTIONS]
   --ssh-key            SSH private key file (optional, auto-detected if omitted)
   --ssh-user           SSH user (login on primary host) (required)
   --temp-waldir        Temporary WAL directory (optional, default: system tmp)
-  --parallel           Number of parallel rsync jobs (optional, default: CPU*2)
+  --parallel           Number of parallel rsync jobs (optional, default: CPU)
   --paranoid           Enable checksum verification (rsync --checksum, VERY SLOW) (optional, default: disabled)
   --drop-existing      Remove existing data in replica pgdata and pg_wal before cloning (optional, default: disabled)
   --debug              Enable bash trace (set -x) for troubleshooting (optional, default: disabled)
@@ -872,6 +922,9 @@ fi
 
 [[ "$PGPORT"    =~ ^[0-9]+$ ]] || fatal "Invalid port"
 [[ "$PARALLEL"  =~ ^[0-9]+$ ]] || fatal "Invalid parallel"
+
+# Informative log about parallelism
+log "Using $PARALLEL parallel rsync worker(s)"
 
 # ---- TEMP_WALDIR handling ----
 if [[ -z "${TEMP_WALDIR:-}" ]]; then

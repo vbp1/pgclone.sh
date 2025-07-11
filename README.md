@@ -8,7 +8,7 @@
 
 - **Physical replication only** (PostgreSQL 15+)
 - Optional temporary replication slot may be created for `pg_receivewal` (`--slot` flag)
-- **Parallel database sync via rsync+rsyncd** (default workers = *CPU cores × 2*)
+- **Parallel database sync via rsync+rsyncd** (default workers = *CPU cores*)
 - **Paranoid mode** with full checksum verification during copy (`--paranoid`)
 - **Unified progress indicator** – dynamic TTY bar or plain periodic lines for logs, plus aggregated rsync statistics
 - Streaming WAL with `pg_receivewal`
@@ -62,7 +62,7 @@ export PGDATABASE=dbname
     # --insecure-ssh \  # uncomment to skip host-key check (NOT recommended) \
     --ssh-key /path/to/id_rsa \
     --ssh-user root \
-    # --parallel 8  \   # optional override; default = CPU*2
+    # --parallel 8  \   # optional override; default = CPU
     --verbose
 ```
 
@@ -73,7 +73,7 @@ export PGDATABASE=dbname
 - `--replica-pgdata`   — path to PGDATA on the replica (optional, defaults to value of `--primary-pgdata`)
 - `--ssh-key`          — private SSH key (optional; auto-detected from `~/.ssh/id_*` or SSH agent)
 - `--ssh-user`         — SSH user
-- `--parallel`         — number of parallel rsync jobs (default: *CPU cores × 2*)
+- `--parallel`         — number of parallel rsync jobs (default: *CPU cores*)
 - `--paranoid`         — enable checksum verification for every file (`rsync --checksum`). Slower but safest.
 - `--temp-waldir`      — temporary directory for storing WAL files streamed by `pg_receivewal` during the clone (optional; default: system temp dir). If the directory is auto-created by **pgclone**, it will be removed completely on exit; otherwise only its contents are cleaned up.
 - `--drop-existing`    — **dangerous**: remove any data found in the target `--replica-pgdata` and its `pg_wal` directory before starting the clone.
