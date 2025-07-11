@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="1.2.0"
+PGCLONE_VERSION="1.3.0"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -13,7 +13,9 @@ REPLICA_WALDIR=""           # Destination pg_wal directory on the replica;
                             # empty ⇒ use "$REPLICA_PGDATA/pg_wal"
 TEMP_WALDIR=""              # Temporary directory where pg_receivewal stores incoming WAL;
                             # empty ⇒ auto-create under /tmp
-PARALLEL=4                  # Number of simultaneous rsync workers for base/tablespace copy
+PARALLEL=$(( $( (getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1) ) * 2 ))  # Number of simultaneous rsync workers (CPU cores x2)
+PARANOID=0                  # 1 = enable rsync --checksum for all copy operations
+TEMP_WALDIR_CREATED=0       # 1 = TEMP_WALDIR was auto-created and should be removed entirely
 VERBOSE=0                   # 1 = print detailed progress/debug logs, 0 = quiet
 # Progress indicator defaults
 PROGRESS_MODE="auto"        # auto|bar|plain|none
@@ -124,10 +126,15 @@ cleanup() {
         wait "$PSQL_PID" 2>/dev/null || true
     fi
 
-    # Removing temp WAL dir content
+    # Removing temp WAL dir content or directory (if auto-created)
     if [[ -d "${TEMP_WALDIR:-}" ]]; then
-        log "Removing temp WAL dir $TEMP_WALDIR content..."
-        find "$TEMP_WALDIR" -mindepth 1 -delete
+        if [[ "$TEMP_WALDIR_CREATED" == "1" ]]; then
+            log "Removing temp WAL dir $TEMP_WALDIR..."
+            rm -rf "$TEMP_WALDIR"
+        else
+            log "Removing temp WAL dir $TEMP_WALDIR content..."
+            find "$TEMP_WALDIR" -mindepth 1 -delete
+        fi
     fi
 
     # Drop temporary replication slot if it was created
@@ -482,6 +489,7 @@ parallel_rsync_module() {
     # LC_ALL=C is required to ensure consistent format for numeric fields
     # awk removes thousands separators (e.g. 1,000,000 -> 1000000)
     LC_ALL=C rsync --list-only --recursive \
+      ${RSYNC_CHECKSUM_FLAG} \
       --password-file="$RSYNC_SECRET_FILE" \
       "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" |
       awk '$1 ~ /^-/ {gsub(/[.,]/, "", $2); print $2 "\t" $5}' > "$file_raw"
@@ -620,6 +628,7 @@ parallel_rsync_module() {
             local RSYNC_BIN
             RSYNC_BIN=$(command -v rsync)
             exec "$RSYNC_BIN" -a --relative --inplace \
+                  ${RSYNC_CHECKSUM_FLAG} \
                   --exclude 'pgsql_tmp*' \
                   --exclude 'pg_internal.init' \
                   --out-format="%l" --info=stats2 \
@@ -678,7 +687,8 @@ Usage: pgclone [OPTIONS]
   --ssh-key            SSH private key file (optional, auto-detected if omitted)
   --ssh-user           SSH user (login on primary host) (required)
   --temp-waldir        Temporary WAL directory (optional, default: system tmp)
-  --parallel           Number of parallel rsync jobs (optional, default: 4)
+  --parallel           Number of parallel rsync jobs (optional, default: CPU*2)
+  --paranoid           Enable checksum verification (rsync --checksum, VERY SLOW) (optional, default: disabled)
   --drop-existing      Remove existing data in replica pgdata and pg_wal before cloning (optional, default: disabled)
   --debug              Enable bash trace (set -x) for troubleshooting (optional, default: disabled)
   --keep-run-tmp       Preserve temporary run directory after completion (for debugging) (optional, default: disabled)
@@ -731,6 +741,7 @@ while getopts ':hv-:' opt; do
                 ssh-user)         ;;
                 temp-waldir)      ;;
                 parallel)         ;;
+                paranoid)         needs_arg=0 ;;
                 drop-existing)    needs_arg=0 ;;
                 debug)            needs_arg=0 ;;
                 keep-run-tmp)     needs_arg=0 ;;
@@ -763,6 +774,7 @@ while getopts ':hv-:' opt; do
                 ssh-user)         SSH_USER="$val" ;;
                 temp-waldir)      TEMP_WALDIR="$val" ;;
                 parallel)         PARALLEL="$val" ;;
+                paranoid)         PARANOID=1 ;;
                 drop-existing)    DROP_EXISTING=1 ;;
                 debug)            DEBUG=1 ;;
                 keep-run-tmp)     KEEP_RUN_TMP=1 ;;
@@ -795,6 +807,17 @@ log "pgclone script version $PGCLONE_VERSION"
 if [[ "$DEBUG" == "1" ]]; then
     set -x
     log "Debug tracing enabled (--debug)"
+fi
+
+# Determine rsync checksum flag based on paranoid mode
+if [[ "$PARANOID" == "1" ]]; then
+    RSYNC_CHECKSUM_FLAG="--checksum"
+else
+    RSYNC_CHECKSUM_FLAG=""
+fi
+# Informative log when running in paranoid mode
+if [[ "$PARANOID" == "1" ]]; then
+    log "--paranoid enabled: rsync will use checksum verification (--checksum)"
 fi
 
 # ==== Global run temp directory ====
@@ -850,7 +873,11 @@ fi
 [[ "$PGPORT"    =~ ^[0-9]+$ ]] || fatal "Invalid port"
 [[ "$PARALLEL"  =~ ^[0-9]+$ ]] || fatal "Invalid parallel"
 
-TEMP_WALDIR="${TEMP_WALDIR:-$(TMPDIR="$RUN_TMPDIR" mktemp -d -t pgclone_temp.XXXXXX)}"
+# ---- TEMP_WALDIR handling ----
+if [[ -z "${TEMP_WALDIR:-}" ]]; then
+    TEMP_WALDIR=$(TMPDIR="$RUN_TMPDIR" mktemp -d -t pgclone_temp.XXXXXX)
+    TEMP_WALDIR_CREATED=1
+fi
 REPLICA_WALDIR="${REPLICA_WALDIR:-$REPLICA_PGDATA/pg_wal}"
 
 if [[ -n "${SSH_KEY:-}" ]]; then
@@ -864,6 +891,9 @@ if [[ "$DROP_EXISTING" == "1" ]]; then
 fi
 
 # Ensure replica directories exist after potential removal
+if [[ ! -d "$TEMP_WALDIR" ]]; then
+    TEMP_WALDIR_CREATED=1
+fi
 mkdir -p "$REPLICA_PGDATA" "$REPLICA_WALDIR" "$TEMP_WALDIR"
 
 # Build SSH options depending on security mode
@@ -1171,7 +1201,7 @@ rsync_log_args=()
 # ==== Initial rsync of all PGDATA except pg_wal and base, transient and temp files ====
 log "Initial rsync of PGDATA (excluding base, pg_wal, transient and temp files)..."
 logfile=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_rsync_initial.XXXXXX)
-rsync -a --delete \
+rsync -a --delete ${RSYNC_CHECKSUM_FLAG} \
     --exclude 'pg_wal/' \
     --exclude 'base/' \
     --exclude 'postmaster.pid' \
@@ -1189,7 +1219,7 @@ rsync -a --delete \
     --password-file="$RSYNC_SECRET_FILE" \
     "rsync://replica@$PGHOST:$RSYNC_PORT/pgdata/" "$REPLICA_PGDATA/" \
     >"$logfile" 2>&1
-
+cat "$logfile"
 # Ensure empty base directory exist
 mkdir -p "$REPLICA_PGDATA/base"
 
