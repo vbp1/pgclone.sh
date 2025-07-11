@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="1.1.2"
+PGCLONE_VERSION="1.2.0"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -15,6 +15,9 @@ TEMP_WALDIR=""              # Temporary directory where pg_receivewal stores inc
                             # empty ⇒ auto-create under /tmp
 PARALLEL=4                  # Number of simultaneous rsync workers for base/tablespace copy
 VERBOSE=0                   # 1 = print detailed progress/debug logs, 0 = quiet
+# Progress indicator defaults
+PROGRESS_MODE="auto"        # auto|bar|plain|none
+PROGRESS_INTERVAL=30        # seconds between plain-mode updates
 
 # replication slot option (disabled by default)
 USE_SLOT=0                  # 1 = create temporary replication slot, 0 = disabled
@@ -136,7 +139,7 @@ cleanup() {
     fi
 
     # --- ensure no children processes remain -------------------
-    for cpid in $(pgrep -P $$ 2>/dev/null || true); do
+    for cpid in $(pgrep -P "$PGCLONE_MAIN_PID" 2>/dev/null || true); do
         if kill -0 "$cpid" 2>/dev/null; then
             cmd=$(ps -o comm= -p "$cpid" 2>/dev/null || true)
             log "Cleaning up child process PID=$cpid, CMD=$cmd"
@@ -319,6 +322,148 @@ wait_for_replication_start() {
     fatal "Timeout ${timeout}s: WAL streaming did not start"
 }
 
+format_bytes() {
+    # Human-readable IEC units (up to PiB). Falls back to awk if numfmt unavailable.
+    local b="$1"
+    if command -v numfmt >/dev/null 2>&1; then
+        numfmt --to=si --suffix="B" --format="%.1f" "$b"
+    else
+        awk -v bytes="$b" '
+        function human(x) {
+            split("B KB MB GB TB PB", u)
+            i=1; while (x>=1000 && i<6) {x/=1000; ++i} printf("%.1f %s", x, u[i])
+        } BEGIN {human(bytes)}'
+    fi
+}
+
+bytes_from_str() {
+    # Convert "3.36T", "357M", "1,024" → bytes (integer). Supports K/M/G/T/P.
+    local s="${1,,}"            # to lowercase
+    s="${s//,/}"                # remove thousands separators
+    s="${s// bytes/}"
+    s="${s//byte/}"
+    s="${s// /}"                # remove spaces
+    s="${s//i/}"                # drop 'i' in KiB/MiB units
+    local unit="${s: -1}"
+    local num
+    if [[ $unit =~ [KkMmGgTtPp] ]]; then
+        num="${s::-1}"
+    else
+        unit=""
+        num="$s"
+    fi
+    num="${num//,/}"
+    num="${num//,/}"
+    local mul=1
+
+    # Return 0 if number part empty (unexpected input)
+    [[ -z "$num" ]] && { echo 0; return; }
+
+    case "$unit" in
+        K|k) mul=1024;;
+        M|m) mul=$((1024**2));;
+        G|g) mul=$((1024**3));;
+        T|t) mul=$((1024**4));;
+        P|p) mul=$((1024**5));;
+    esac
+    awk -v n="${num//,/.}" -v m="$mul" 'BEGIN{printf "%.0f", n*m}'
+}
+
+aggregate_rsync_stats() {
+    # Usage: aggregate_rsync_stats logfile1 logfile2 ...
+    local logfiles=("$@")
+    local line val
+    local num_files=0 created_files=0 deleted_files=0 reg_transferred=0
+    local total_file_size=0 total_transferred_size=0 literal_data=0 matched_data=0
+    local file_list_size=0 file_list_gen_time=0 file_list_tx_time=0
+    local bytes_sent=0 bytes_received=0
+
+    # (debug logs removed)
+    for lf in "${logfiles[@]}"; do
+        while IFS= read -r line; do
+            case "$line" in
+                "Number of files:"*)
+                    val=$(echo "$line" | grep -oE '[0-9]+' | head -1)
+                    [[ -z "$val" ]] && val=0
+                    (( num_files += val )) ;;
+                "Number of created files:"*)
+                    val=$(echo "$line" | grep -oE '[0-9]+' | head -1)
+                    [[ -z "$val" ]] && val=0
+                    (( created_files += val )) ;;
+                "Number of deleted files:"*)
+                    val=$(echo "$line" | grep -oE '[0-9]+' | head -1)
+                    [[ -z "$val" ]] && val=0
+                    (( deleted_files += val )) ;;
+                "Number of regular files transferred:"*)
+                    val=$(echo "$line" | grep -oE '[0-9]+' | head -1)
+                    [[ -z "$val" ]] && val=0
+                    (( reg_transferred += val )) ;;
+                "Total file size:"*)
+                    val=$(echo "$line" | awk -F: '{print $2}' | awk '{print $1}')
+                    total_file_size=$(( total_file_size + $(bytes_from_str "$val") )) ;;
+                "Total transferred file size:"*)
+                    val=$(echo "$line" | awk -F: '{print $2}' | awk '{print $1}')
+                    total_transferred_size=$(( total_transferred_size + $(bytes_from_str "$val") )) ;;
+                "Literal data:"*)
+                    val=$(echo "$line" | awk -F: '{print $2}' | awk '{print $1}')
+                    literal_data=$(( literal_data + $(bytes_from_str "$val") )) ;;
+                "Matched data:"*)
+                    val=$(echo "$line" | awk -F: '{print $2}' | awk '{print $1}')
+                    matched_data=$(( matched_data + $(bytes_from_str "$val") )) ;;
+                "File list size:"*)
+                    val=$(echo "$line" | awk -F: '{print $2}' | awk '{print $1}')
+                    file_list_size=$(( file_list_size + $(bytes_from_str "$val") )) ;;
+                "File list generation time:"*)
+                    val=$(echo "$line" | awk -F: '{print $2}' | awk '{print $1}')
+                    file_list_gen_time=$(awk -v a="$file_list_gen_time" -v b="${val//,/}" 'BEGIN{printf "%.3f", a+b}') ;;
+                "File list transfer time:"*)
+                    val=$(echo "$line" | awk -F: '{print $2}' | awk '{print $1}')
+                    file_list_tx_time=$(awk -v a="$file_list_tx_time" -v b="${val//,/}" 'BEGIN{printf "%.3f", a+b}') ;;
+                "Total bytes sent:"*)
+                    val=$(echo "$line" | awk -F: '{print $2}' | awk '{print $1}')
+                    bytes_sent=$(( bytes_sent + $(bytes_from_str "$val") )) ;;
+                "Total bytes received:"*)
+                    val=$(echo "$line" | awk -F: '{print $2}' | awk '{print $1}')
+                    bytes_received=$(( bytes_received + $(bytes_from_str "$val") )) ;;
+                "sent "*)
+                    # final summary line
+                    sent=$(echo "$line" | awk '{print $2}')
+                    recv=$(echo "$line" | awk '{print $5}')
+                    bytes_sent=$(( bytes_sent + $(bytes_from_str "$sent") ))
+                    bytes_received=$(( bytes_received + $(bytes_from_str "$recv") )) ;;
+            esac
+        done < "$lf" || true
+    done
+
+    local total_bytes=$(( bytes_sent + bytes_received ))
+    local elapsed=$(( $(date +%s) - AGGR_START_EPOCH ))
+    (( elapsed == 0 )) && elapsed=1
+    local speed=$(( total_bytes / elapsed ))
+
+    # ---------- output ----------
+    echo
+    printf "Number of files: %'d\n" "$num_files"
+    printf "Number of created files: %'d\n" "$created_files"
+    printf "Number of deleted files: %'d\n" "$deleted_files"
+    printf "Number of regular files transferred: %'d\n" "$reg_transferred"
+    printf "Total file size: %s\n" "$(format_bytes "$total_file_size")"
+    printf "Total transferred file size: %s\n" "$(format_bytes "$total_transferred_size")"
+    printf "Literal data: %s\n" "$(format_bytes "$literal_data")"
+    printf "Matched data: %s\n" "$(format_bytes "$matched_data")"
+    printf "File list size: %s\n" "$(format_bytes "$file_list_size")"
+    printf "File list generation time: %.3f seconds\n" "$file_list_gen_time"
+    printf "File list transfer time: %.3f seconds\n" "$file_list_tx_time"
+    printf "Total bytes sent: %s\n" "$(format_bytes "$bytes_sent")"
+    printf "Total bytes received: %s\n" "$(format_bytes "$bytes_received")"
+    echo
+    printf "sent %s  received %s  %s/sec\n" \
+        "$(format_bytes "$bytes_sent")" \
+        "$(format_bytes "$bytes_received")" \
+        "$(format_bytes "$speed")"
+
+    # (debug summary removed)
+}
+
 # $1 = rsync-module, $2 = dst
 parallel_rsync_module() {
     local module="$1" dst="$2"
@@ -374,6 +519,90 @@ parallel_rsync_module() {
     awk -F'\t' '{print $2}' "$file_raw" | awk -F/ 'NF>1{NF--;print}' OFS=/ | sort -u |
         while read -r d; do mkdir -p "$dst/$d"; done
 
+    # ---- total bytes for progress ----
+    local total_bytes
+    total_bytes=$(awk -F'\t' '{s+=$1} END{print s}' "$file_raw")
+    [[ -z "$total_bytes" ]] && total_bytes=0
+
+    if (( total_bytes == 0 )); then
+        log "[rsync] Module $module: nothing to transfer (empty file list)"
+        rm -f "$file_raw" "$file_sorted" "${part_prefix}"*
+        rmdir "$part_dir" 2>/dev/null || true
+        return 0
+    fi
+
+    # ---------------- Progress infrastructure ------------------
+    local progress_pipe
+    progress_pipe=$(TMPDIR="$RUN_TMPDIR" mktemp -u -t pgclone_pipe_"${module}".XXXXXX)
+    mkfifo "$progress_pipe"
+
+    AGGR_START_EPOCH=$(date +%s)
+
+    # Aggregator background process
+    (
+        local transferred=0 start last_print bar_width=40
+        start=$AGGR_START_EPOCH
+        last_print=$start
+        local show_bar=0 show_plain=0
+        case "$PROGRESS_MODE" in
+            bar)   show_bar=1 ;;
+            plain) show_plain=1 ;;
+            auto)
+                if [[ -t 1 ]]; then show_bar=1; else show_plain=0; fi ;;
+            none|"") : ;;
+        esac
+
+        local interval=$PROGRESS_INTERVAL
+
+        while read -r sz; do
+            [[ -z "$sz" ]] && continue
+            [[ ! "$sz" =~ ^[0-9]+$ ]] && continue
+            transferred=$(( transferred + sz ))
+            local now
+            now=$(date +%s)
+
+            if (( show_bar && now - last_print >= 1 )); then
+                local percent=$(( transferred * 100 / total_bytes ))
+                (( percent > 100 )) && percent=100
+                local filled=$(( percent * bar_width / 100 ))
+                printf '\r[' >&2
+                if (( filled > 0 )); then printf '#%.0s' $(seq 1 $filled) >&2; fi
+                local remaining=$(( bar_width - filled ))
+                if (( remaining > 0 )); then printf -- '-%.0s' $(seq 1 $remaining) >&2; fi
+                printf "] %3d %% (%s / %s)" "$percent" "$(format_bytes "$transferred")" "$(format_bytes "$total_bytes")" >&2
+                last_print=$now
+            elif (( show_plain && now - last_print >= interval )); then
+                local percent=$(( transferred * 100 / total_bytes ))
+                (( percent > 100 )) && percent=100
+                local speed=$(( (now - start) > 0 ? transferred / (now - start) : 0 ))
+                local remaining=$(( total_bytes - transferred ))
+                local eta=$(( speed > 0 ? remaining / speed : 0 ))
+                printf "[%s] %3d %%  (%s / %s, %s/s, ETA %02d:%02d:%02d)\n" \
+                    "$(date '+%F %T')" "$percent" \
+                    "$(format_bytes "$transferred")" "$(format_bytes "$total_bytes")" \
+                    "$(format_bytes "$speed")" $(( eta/3600 )) $(( (eta%3600)/60 )) $(( eta%60 )) >&2
+                last_print=$now
+            fi
+        done <"$progress_pipe"
+
+        # Final output
+        local duration=$(( $(date +%s) - start ))
+        (( duration==0 )) && duration=1
+        local speed_final=$(( total_bytes / duration ))
+        if (( show_bar )); then
+            printf "\r[" >&2; printf '#%.0s' $(seq 1 $bar_width) >&2; printf "] 100 %% (%s / %s)\n" \
+                "$(format_bytes "$total_bytes")" "$(format_bytes "$total_bytes")" >&2
+        elif (( show_plain )); then
+            printf "[%s] 100 %%  (%s / %s, %s/s)\n" \
+                "$(date '+%F %T')" "$(format_bytes "$total_bytes")" "$(format_bytes "$total_bytes")" \
+                "$(format_bytes "$speed_final")" >&2
+        fi
+    ) &
+    AGGR_PID=$!
+
+    # Keep writer FD open in parent *after* reader exists to avoid blocking on FIFO
+    exec {PROG_FD}>"$progress_pipe"
+
     # run rsync workers in parallel
     mapfile -t parts < <(ls "${part_prefix}"*)
     pids=()
@@ -388,14 +617,18 @@ parallel_rsync_module() {
         logfile=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_rsync_"${module}"_"${idx}".XXXXXX)
         RSYNC_LOGFILES+=("$logfile")
         (
-            rsync -a --relative --inplace \
+            local RSYNC_BIN
+            RSYNC_BIN=$(command -v rsync)
+            exec "$RSYNC_BIN" -a --relative --inplace \
                   --exclude 'pgsql_tmp*' \
                   --exclude 'pg_internal.init' \
+                  --out-format="%l" --info=stats2 \
                   "${rsync_log_args[@]}" \
                   --files-from="${parts[$idx]}" \
                   --password-file="$RSYNC_SECRET_FILE" \
                   "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" "$dst/" \
-                  >"$logfile" 2>&1
+                  > >(awk -v p="$progress_pipe" -v l="$logfile" '{ if ($0 ~ /^[0-9]+$/) print > p; print >> l }') \
+                  2>>"$logfile"
         ) &
         pids+=($!)
     done
@@ -409,18 +642,16 @@ parallel_rsync_module() {
         ((remaining--))             # successful worker
     done
 
-    # print rsync worker logs if verbose
-    if [[ "$VERBOSE" == "1" ]]; then
-        for idx in "${!RSYNC_LOGFILES[@]}"; do
-            if [[ -s "${RSYNC_LOGFILES[$idx]}" ]]; then
-                echo
-                echo "====== rsync worker $((idx + 1)) output log start ======"
-                cat  "${RSYNC_LOGFILES[$idx]}"
-                echo "====== rsync worker $((idx + 1)) output log end ======"
-                echo
-            fi
-        done
+    # Close parent writer FD and wait for aggregator
+    exec {PROG_FD}>&-
+    if [[ -n "${AGGR_PID:-}" ]]; then
+        if ! wait "$AGGR_PID"; then
+            fatal "progress aggregator failed"
+        fi
     fi
+
+    # Aggregate and print rsync statistics
+    aggregate_rsync_stats "${RSYNC_LOGFILES[@]}"
 
     # Cleanup temporary files
     for f in "${RSYNC_LOGFILES[@]}"; do rm -f "$f"; done
@@ -438,24 +669,26 @@ print_usage () {
     cat <<EOF
 Usage: pgclone [OPTIONS]
 
-  --pghost           Primary host (required)
-  --pgport           Primary port (default 5432)
-  --pguser           Primary user (required)
-  --primary-pgdata   Primary PGDATA path (required)
-  --replica-pgdata   Replica PGDATA path (optional, default: same as --primary-pgdata)
-  --replica-waldir   Replica pg_wal path (optional, default: <replica-pgdata>/pg_wal)
-  --ssh-key          SSH private key file (optional, auto-detected if omitted)
-  --ssh-user         SSH user (login on primary host) (required)
-  --temp-waldir      Temporary WAL directory (optional, default: system tmp)
-  --parallel         Number of parallel rsync jobs (optional, default: 4)
-  --drop-existing    Remove existing data in replica pgdata and pg_wal before cloning (optional, default: disabled)
-  --debug            Enable bash trace (set -x) for troubleshooting (optional, default: disabled)
-  --keep-run-tmp     Preserve temporary run directory after completion (for debugging) (optional, default: disabled)
-  --slot             Use a temporary physical replication slot (auto-named, disabled by default) (optional, default: disabled)
-  --insecure-ssh     Disable known_hosts verification (equivalent to StrictHostKeyChecking=no) – NOT recommended (optional, default: disabled)
-  --verbose          Verbose output (optional, default: disabled)
-  -v, --version      Print version and exit
-  -h, --help         Show this help and exit
+  --pghost             Primary host (required)
+  --pgport             Primary port (default 5432)
+  --pguser             Primary user (required)
+  --primary-pgdata     Primary PGDATA path (required)
+  --replica-pgdata     Replica PGDATA path (optional, default: same as --primary-pgdata)
+  --replica-waldir     Replica pg_wal path (optional, default: <replica-pgdata>/pg_wal)
+  --ssh-key            SSH private key file (optional, auto-detected if omitted)
+  --ssh-user           SSH user (login on primary host) (required)
+  --temp-waldir        Temporary WAL directory (optional, default: system tmp)
+  --parallel           Number of parallel rsync jobs (optional, default: 4)
+  --drop-existing      Remove existing data in replica pgdata and pg_wal before cloning (optional, default: disabled)
+  --debug              Enable bash trace (set -x) for troubleshooting (optional, default: disabled)
+  --keep-run-tmp       Preserve temporary run directory after completion (for debugging) (optional, default: disabled)
+  --slot               Use a temporary physical replication slot (auto-named, disabled by default) (optional, default: disabled)
+  --insecure-ssh       Disable known_hosts verification (equivalent to StrictHostKeyChecking=no) – NOT recommended (optional, default: disabled)
+  --progress           Progress display mode: auto|bar|plain|none (optional, default: auto)
+  --progress-interval  Seconds between plain progress updates (optional, default: 30)
+  --verbose            Verbose output (optional, default: disabled)
+  -v, --version        Print version and exit
+  -h, --help           Show this help and exit
 EOF
 }
 
@@ -503,6 +736,10 @@ while getopts ':hv-:' opt; do
                 keep-run-tmp)     needs_arg=0 ;;
                 slot)             needs_arg=0 ;;
                 insecure-ssh)     needs_arg=0 ;;
+                progress)
+                    PROGRESS_MODE="$val" ;;
+                progress-interval)
+                    PROGRESS_INTERVAL="$val" ;;
                 *) fatal "Unknown option --$long" ;;
             esac
 
@@ -531,6 +768,8 @@ while getopts ':hv-:' opt; do
                 keep-run-tmp)     KEEP_RUN_TMP=1 ;;
                 slot)             USE_SLOT=1 ;;
                 insecure-ssh)     INSECURE_SSH=1 ;;
+                progress)        PROGRESS_MODE="$val" ;;
+                progress-interval) PROGRESS_INTERVAL="$val" ;;
             esac
             ;;
         h) show_help=1    ;;
