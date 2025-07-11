@@ -9,6 +9,7 @@
 - **Physical replication only** (PostgreSQL 15+)
 - Optional temporary replication slot may be created for `pg_receivewal` (`--slot` flag)
 - **Parallel database sync via rsync+rsyncd**
+- **Unified progress indicator** – dynamic TTY bar or plain periodic lines for logs, plus aggregated rsync statistics
 - Streaming WAL with `pg_receivewal`
 - Automated testing/demo via Docker (`demo.sh`)
 - Debug-friendly flags: `--debug` (shell trace) and `--keep-run-tmp` (preserve temp files)
@@ -72,13 +73,20 @@ export PGDATABASE=dbname
 - `--ssh-key`          — private SSH key (optional; auto-detected from `~/.ssh/id_*` or SSH agent)
 - `--ssh-user`         — SSH user
 - `--parallel`         — number of parallel rsync jobs (default: 4)
-- `--temp-waldir`      - temporary directory for storing WAL files streamed by `pg_receivewal` during the clone (optional; default: system temp dir). After the copy is finished, all files are moved to the replica's `pg_wal`, ensuring no WAL segment is lost or overwritten during the initial sync.
+- `--temp-waldir`      — temporary directory for storing WAL files streamed by `pg_receivewal` during the clone (optional; default: system temp dir). After the copy is finished, all files are moved to the replica's `pg_wal`, ensuring no WAL segment is lost or overwritten during the initial sync.
 - `--drop-existing`    — **dangerous**: remove any data found in the target `--replica-pgdata` and its `pg_wal` directory before starting the clone.
 - `--debug`            — run the script in *x-trace* mode (`set -x`), printing every executed command for troubleshooting.
 - `--slot`             — create and use an ephemeral physical replication slot (`pgclone_<pid>`). The slot is automatically dropped on completion or if the script terminates abnormally.
 - `--keep-run-tmp`     — keep the per-run temporary directory (shown in the log) instead of deleting it on exit.
 - `--insecure-ssh`     — disable strict host-key verification (`StrictHostKeyChecking=no`). Use **only** for testing; this opens the door for MITM attacks. By default, `pgclone` **requires** the primary host to be present in `~/.ssh/known_hosts` and aborts if the key is unknown.
 
+*Progress flags*
+- `--progress`          — progress display mode: `auto` (default), `bar`, `plain`, `none`.
+    * `auto`            — dynamic bar when stdout is a TTY; silent otherwise.
+    * `bar`             — always draw a real-time progress bar (overwrites the same line).
+    * `plain`           — write a static status line every *N* seconds (see next flag), suitable for log files and CI runners.
+    * `none`            — completely mute until the final summary.
+- `--progress-interval` — seconds between updates in `plain` mode (default: 30).
 
 **Note:**  
 You must provide a password in **one** of two ways:  
