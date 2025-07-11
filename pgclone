@@ -505,13 +505,22 @@ parallel_rsync_module() {
     awk -F'\t' '{print $2}' "$file_raw" | awk -F/ 'NF>1{NF--;print}' OFS=/ | sort -u |
         while read -r d; do mkdir -p "$dst/$d"; done
 
+    # ---- total bytes for progress ----
+    local total_bytes
+    total_bytes=$(awk -F'\t' '{s+=$1} END{print s}' "$file_raw")
+    [[ -z "$total_bytes" ]] && total_bytes=0
+
+    if (( total_bytes == 0 )); then
+        log "[rsync] Module $module: nothing to transfer (empty file list)"
+        rm -f "$file_raw" "$file_sorted" "${part_prefix}"*
+        rmdir "$part_dir" 2>/dev/null || true
+        return 0
+    fi
+
     # ---------------- Progress infrastructure ------------------
     local progress_pipe
     progress_pipe=$(TMPDIR="$RUN_TMPDIR" mktemp -u -t pgclone_pipe_"${module}".XXXXXX)
     mkfifo "$progress_pipe"
-
-    # Keep writer FD open in parent to prevent premature EOF
-    exec {PROG_FD}>"$progress_pipe"
 
     AGGR_START_EPOCH=$(date +%s)
 
@@ -576,6 +585,9 @@ parallel_rsync_module() {
     ) &
     AGGR_PID=$!
 
+    # Keep writer FD open in parent *after* reader exists to avoid blocking on FIFO
+    exec {PROG_FD}>"$progress_pipe"
+
     # run rsync workers in parallel
     mapfile -t parts < <(ls "${part_prefix}"*)
     pids=()
@@ -616,7 +628,9 @@ parallel_rsync_module() {
     # Close parent writer FD and wait for aggregator
     exec {PROG_FD}>&-
     if [[ -n "${AGGR_PID:-}" ]]; then
-        wait "$AGGR_PID" || true
+        if ! wait "$AGGR_PID"; then
+            fatal "progress aggregator failed"
+        fi
     fi
 
     # Aggregate and print rsync statistics
