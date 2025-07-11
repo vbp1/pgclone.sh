@@ -637,6 +637,7 @@ parallel_rsync_module() {
         (
             local RSYNC_BIN
             RSYNC_BIN=$(command -v rsync)
+            # shellcheck disable=SC2129,SC2128
             exec "$RSYNC_BIN" -a --relative --inplace \
                   ${RSYNC_CHECKSUM_FLAG} \
                   --exclude 'pgsql_tmp*' \
@@ -646,7 +647,7 @@ parallel_rsync_module() {
                   --files-from="${parts[$idx]}" \
                   --password-file="$RSYNC_SECRET_FILE" \
                   "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" "$dst/" \
-                  > >(awk -v p="$progress_pipe" -v l="$logfile" '{ if ($0 ~ /^[0-9]+$/) { print > p; fflush(p) } ; print >> l; fflush(l) }') \
+                  > >(awk -v p="$progress_pipe" -v l="$logfile" '{ if ($0 ~ /^[0-9]+$/) { print > p } ; print >> l; fflush(l) }') \
                   2>>"$logfile"
         ) &
         pids+=($!)
