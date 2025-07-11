@@ -904,6 +904,9 @@ fi
 [[ "$PGPORT"    =~ ^[0-9]+$ ]] || fatal "Invalid port"
 [[ "$PARALLEL"  =~ ^[0-9]+$ ]] || fatal "Invalid parallel"
 
+# Informative log about parallelism
+log "Using $PARALLEL parallel rsync worker(s)"
+
 # ---- TEMP_WALDIR handling ----
 if [[ -z "${TEMP_WALDIR:-}" ]]; then
     TEMP_WALDIR=$(TMPDIR="$RUN_TMPDIR" mktemp -d -t pgclone_temp.XXXXXX)
