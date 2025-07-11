@@ -13,7 +13,7 @@ REPLICA_WALDIR=""           # Destination pg_wal directory on the replica;
                             # empty ⇒ use "$REPLICA_PGDATA/pg_wal"
 TEMP_WALDIR=""              # Temporary directory where pg_receivewal stores incoming WAL;
                             # empty ⇒ auto-create under /tmp
-PARALLEL=$(( $( (getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1) ) * 2 ))  # Number of simultaneous rsync workers (CPU cores x2)
+PARALLEL=$(( $( (getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1) ) * 1 ))  # Number of simultaneous rsync workers (CPU cores)
 PARANOID=0                  # 1 = enable rsync --checksum for all copy operations
 TEMP_WALDIR_CREATED=0       # 1 = TEMP_WALDIR was auto-created and should be removed entirely
 VERBOSE=0                   # 1 = print detailed progress/debug logs, 0 = quiet
@@ -687,7 +687,7 @@ Usage: pgclone [OPTIONS]
   --ssh-key            SSH private key file (optional, auto-detected if omitted)
   --ssh-user           SSH user (login on primary host) (required)
   --temp-waldir        Temporary WAL directory (optional, default: system tmp)
-  --parallel           Number of parallel rsync jobs (optional, default: CPU*2)
+  --parallel           Number of parallel rsync jobs (optional, default: CPU)
   --paranoid           Enable checksum verification (rsync --checksum, VERY SLOW) (optional, default: disabled)
   --drop-existing      Remove existing data in replica pgdata and pg_wal before cloning (optional, default: disabled)
   --debug              Enable bash trace (set -x) for troubleshooting (optional, default: disabled)
