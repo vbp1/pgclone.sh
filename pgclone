@@ -543,24 +543,43 @@ parallel_rsync_module() {
     # Try to get precise amount using a dry-run.  Any failure will silently
     # fall back to the estimate above.
     if (( total_bytes > 0 )); then
-        local dry_log dry_bytes
+        local dry_log dry_bytes file_paths
         dry_log=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_dry_${module}.XXXXXX)
+        file_paths=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_paths_${module}.XXXXXX)
+        awk -F'\t' '{print $2}' "$file_raw" > "$file_paths"
+
+        # First attempt: count sizes of files that will be transferred using %l format.
         if rsync -a --dry-run --relative --inplace \
               ${RSYNC_CHECKSUM_FLAG} \
               --exclude 'pgsql_tmp*' \
               --exclude 'pg_internal.init' \
-              --out-format="" --stats \
-              --files-from="$file_raw" \
+              --out-format="%l" \
+              --files-from="$file_paths" \
               --password-file="$RSYNC_SECRET_FILE" \
               "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" "$dst/" \
               >"$dry_log" 2>/dev/null; then
-            dry_bytes=$(awk -F: '/Total transferred file size:/ {print $2}' "$dry_log" | awk '{print $1}')
-            dry_bytes=$(bytes_from_str "$dry_bytes")
-            if [[ -n "$dry_bytes" && "$dry_bytes" =~ ^[0-9]+$ ]]; then
-                total_bytes=$dry_bytes
-            fi
+               dry_bytes=$(awk '/^[0-9]+$/{s+=$1} END{print s}' "$dry_log")
         fi
-        rm -f "$dry_log"
+ 
+        # Fallback: parse --stats output if first method produced zero/empty.
+        if [[ -z "$dry_bytes" || ! "$dry_bytes" =~ ^[0-9]+$ || "$dry_bytes" -eq 0 ]]; then
+            rsync -a --dry-run --relative --inplace \
+                  ${RSYNC_CHECKSUM_FLAG} \
+                  --exclude 'pgsql_tmp*' \
+                  --exclude 'pg_internal.init' \
+                  --out-format="" --stats \
+                  --files-from="$file_paths" \
+                  --password-file="$RSYNC_SECRET_FILE" \
+                  "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" "$dst/" \
+                  >"$dry_log" 2>&1
+            dry_bytes_line=$(awk -F: '/Total transferred file size:/ {print $2}' "$dry_log" | awk '{print $1; exit}' | tr -d '.')
+            dry_bytes=$(bytes_from_str "$dry_bytes_line")
+        fi
+ 
+        if [[ -n "$dry_bytes" && "$dry_bytes" =~ ^[0-9]+$ && "$dry_bytes" -gt 0 ]]; then
+            total_bytes=$dry_bytes
+        fi
+        rm -f "$dry_log" "$file_paths"
     fi
 
     if (( total_bytes == 0 )); then
