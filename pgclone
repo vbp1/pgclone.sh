@@ -544,8 +544,8 @@ parallel_rsync_module() {
     # fall back to the estimate above.
     if (( total_bytes > 0 )); then
         local dry_log dry_bytes file_paths
-        dry_log=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_dry_${module}.XXXXXX)
-        file_paths=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_paths_${module}.XXXXXX)
+        dry_log=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_dry_"${module}".XXXXXX)
+        file_paths=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_paths_"${module}".XXXXXX)
         awk -F'\t' '{print $2}' "$file_raw" > "$file_paths"
 
         # First attempt: count sizes of files that will be transferred using %l format.
