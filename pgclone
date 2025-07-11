@@ -634,6 +634,7 @@ parallel_rsync_module() {
         local logfile
         logfile=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_rsync_"${module}"_"${idx}".XXXXXX)
         RSYNC_LOGFILES+=("$logfile")
+        # shellcheck disable=SC2128,SC2129
         (
             local RSYNC_BIN
             RSYNC_BIN=$(command -v rsync)
@@ -646,7 +647,7 @@ parallel_rsync_module() {
                   --files-from="${parts[$idx]}" \
                   --password-file="$RSYNC_SECRET_FILE" \
                   "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" "$dst/" \
-                  > >(awk -v p="$progress_pipe" -v l="$logfile" '{ if ($0 ~ /^[0-9]+$/) print > p; print >> l }') \
+                  > >(awk -v p="$progress_pipe" -v l="$logfile" '{ if ($0 ~ /^[0-9]+$/) { print > p; fflush(p) } ; print >> l; fflush(l) }') \
                   2>>"$logfile"
         ) &
         pids+=($!)
