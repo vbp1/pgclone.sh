@@ -14,6 +14,7 @@ REPLICA_WALDIR=""           # Destination pg_wal directory on the replica;
 TEMP_WALDIR=""              # Temporary directory where pg_receivewal stores incoming WAL;
                             # empty ⇒ auto-create under /tmp
 PARALLEL=$(( $( (getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1) ) * 2 ))  # Number of simultaneous rsync workers (CPU cores x2)
+PARALLEL_SPECIFIED=0        # 1 = --parallel provided, 0 = auto (CPU*2)
 PARANOID=0                  # 1 = enable rsync --checksum for all copy operations
 TEMP_WALDIR_CREATED=0       # 1 = TEMP_WALDIR was auto-created and should be removed entirely
 VERBOSE=0                   # 1 = print detailed progress/debug logs, 0 = quiet
@@ -562,10 +563,14 @@ parallel_rsync_module() {
 
         local interval=$PROGRESS_INTERVAL
 
-        while read -r sz; do
-            [[ -z "$sz" ]] && continue
-            [[ ! "$sz" =~ ^[0-9]+$ ]] && continue
-            transferred=$(( transferred + sz ))
+        while true; do
+            if read -r -t 1 sz <"$progress_pipe"; then
+                # read succeeded (may be empty on EOF)
+                if [[ -n "$sz" && "$sz" =~ ^[0-9]+$ ]]; then
+                    transferred=$(( transferred + sz ))
+                fi
+            fi
+
             local now
             now=$(date +%s)
 
@@ -583,15 +588,20 @@ parallel_rsync_module() {
                 local percent=$(( transferred * 100 / total_bytes ))
                 (( percent > 100 )) && percent=100
                 local speed=$(( (now - start) > 0 ? transferred / (now - start) : 0 ))
-                local remaining=$(( total_bytes - transferred ))
-                local eta=$(( speed > 0 ? remaining / speed : 0 ))
+                local remaining_bytes=$(( total_bytes - transferred ))
+                local eta=$(( speed > 0 ? remaining_bytes / speed : 0 ))
                 printf "[%s] %3d %%  (%s / %s, %s/s, ETA %02d:%02d:%02d)\n" \
                     "$(date '+%F %T')" "$percent" \
                     "$(format_bytes "$transferred")" "$(format_bytes "$total_bytes")" \
                     "$(format_bytes "$speed")" $(( eta/3600 )) $(( (eta%3600)/60 )) $(( eta%60 )) >&2
                 last_print=$now
             fi
-        done <"$progress_pipe"
+
+            # Exit loop when transfer complete and pipe closed (EOF)
+            if (( transferred >= total_bytes )); then
+                break
+            fi
+        done
 
         # Final output
         local duration=$(( $(date +%s) - start ))
@@ -773,7 +783,7 @@ while getopts ':hv-:' opt; do
                 ssh-key)          SSH_KEY="$val" ;;
                 ssh-user)         SSH_USER="$val" ;;
                 temp-waldir)      TEMP_WALDIR="$val" ;;
-                parallel)         PARALLEL="$val" ;;
+                parallel)         PARALLEL="$val"; PARALLEL_SPECIFIED=1 ;;
                 paranoid)         PARANOID=1 ;;
                 drop-existing)    DROP_EXISTING=1 ;;
                 debug)            DEBUG=1 ;;
@@ -872,6 +882,11 @@ fi
 
 [[ "$PGPORT"    =~ ^[0-9]+$ ]] || fatal "Invalid port"
 [[ "$PARALLEL"  =~ ^[0-9]+$ ]] || fatal "Invalid parallel"
+if [[ "$PARALLEL_SPECIFIED" == "1" ]]; then
+    log "Using $PARALLEL parallel rsync workers (user-specified)"
+else
+    log "Using $PARALLEL parallel rsync workers (auto CPU*2)"
+fi
 
 # ---- TEMP_WALDIR handling ----
 if [[ -z "${TEMP_WALDIR:-}" ]]; then
