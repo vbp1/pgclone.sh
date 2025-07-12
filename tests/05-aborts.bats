@@ -92,9 +92,9 @@ teardown() { stop_test_env; network_rm; }
 }
 
 # ------------------------------------------------------------------------------
-# E-2 – SIGINT to pgclone cleans up all rsync workers
+# E-2 – TERM to rsync worker ⇒ pgclone exits with non-zero status
 # ------------------------------------------------------------------------------
-@test "SIGINT triggers rsync workers cleanup" {
+@test "ERM to rsync worker -> pgclone exits with non-zero status" {
   start_primary 15; start_replica 15
 
 docker exec -u postgres "$REPLICA" bash -c '

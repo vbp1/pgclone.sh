@@ -152,8 +152,10 @@ check_clean() {
   [ "$status" -ne 0 ] || fail "pgclone process still running on replica: $output"
 
   # Ensure no leftover rsync worker processes on replica
-  run docker exec -u postgres "$REPLICA" pgrep -f '[r]sync -a'
+  run docker exec -u postgres "$REPLICA" pgrep -f 'rsync'
   [ "$status" -ne 0 ] || fail "rsync worker processes still running on replica: $output"
+  run docker exec -u postgres "$REPLICA" pgrep -f 'awk'
+  [ "$status" -ne 0 ] || fail "rsync auxiliary worker processes still running on replica: $output"
 
   # Ensure no leftover per-run temp directories
   run docker exec -u postgres "$REPLICA" find /tmp -maxdepth 1 -type d -name 'pgclone_*'

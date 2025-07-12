@@ -410,7 +410,6 @@ aggregate_rsync_stats() {
     local file_list_size=0 file_list_gen_time=0
     local bytes_sent=0 bytes_received=0
 
-    # (debug logs removed)
     for lf in "${logfiles[@]}"; do
         while IFS= read -r line; do
             case "$line" in
