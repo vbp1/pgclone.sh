@@ -552,6 +552,7 @@ parallel_rsync_module() {
         while read -r d; do mkdir -p "$dst/$d"; done
 
     # ---- total bytes for progress ----
+
     # Temp file for passing final transferred total from aggregator to parent
     local progress_total_file
     progress_total_file=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_transfer_total_"${module}".XXXXXX)
