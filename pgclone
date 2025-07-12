@@ -396,6 +396,8 @@ int_from_stats() {
     # Remove any whitespace (including non-breaking) and commas used as thousand separators
     s="${s//[[:space:]]/}"
     s="${s//,/}"
+    # Also remove periods used as thousands separators (e.g., "1.700" -> "1700")
+    s="${s//./}"
     [[ -z "$s" ]] && s=0
     echo "$s"
 }
