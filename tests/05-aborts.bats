@@ -130,7 +130,7 @@ EOF
   # Wait until at least one rsync worker appears, then kill pgclone main script
   docker exec "$REPLICA" bash -c '
   for i in {1..30}; do
-    if pgrep -f "rsync .*-a --relative --inplace" | grep -v $$ >/dev/null; then
+    if pgrep -af "rsync .*-a --relative --inplace" | grep -v $$ | grep -vq -- '--dry-run'; then
       break
     fi
     sleep 1

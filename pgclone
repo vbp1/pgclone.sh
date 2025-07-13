@@ -1045,6 +1045,9 @@ fs_pgdata=$(df -P "$REPLICA_PGDATA" | awk 'NR==2{print $6}')
 fs_need_kb[$fs_pgdata]=$(( ${fs_need_kb[$fs_pgdata]:-0} + primary_size_mb*1024 ))
 
 # tablespaces
+# directories for the tablespaces should exist on replica host and 
+# pgclone user should have access to them
+# or we should have permissions to create them
 discover_tablespaces
 for oid in "${!TBLSPCS[@]}"; do
     dst=${TBLSPCS_DST[$oid]}
@@ -1297,6 +1300,12 @@ rsync_log_args=()
 # ==== Initial rsync of all PGDATA except pg_wal and base, transient and temp files ====
 log "Initial rsync of PGDATA (excluding base, pg_wal, transient and temp files)..."
 logfile=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_rsync_initial.XXXXXX)
+# We don't exclude pg_tblspc because rsync will create all 
+# the symlinks to the tablespace directories
+# for this time they are broken, but we will fix them later
+# when we will sync them
+# directories for the tablespaces should exist on replica host and 
+# pgclone user should have access to them
 rsync -a --delete ${RSYNC_CHECKSUM_FLAG} \
     --exclude 'pg_wal/' \
     --exclude 'base/' \
@@ -1318,6 +1327,10 @@ rsync -a --delete ${RSYNC_CHECKSUM_FLAG} \
 cat "$logfile"
 # Ensure empty base directory exist
 mkdir -p "$REPLICA_PGDATA/base"
+# Create empty subdirs for excluded runtime directories
+for d in pg_replslot pg_dynshmem pg_notify pg_serial pg_snapshots pg_stat_tmp pg_subtrans; do
+    mkdir -p "$REPLICA_PGDATA/$d"
+done
 
 log "Parallel rsync of base directory..."
 parallel_rsync_module "base" "$REPLICA_PGDATA/base"
@@ -1331,11 +1344,6 @@ done
 log "Tablespaces synced"
 
 rm -f "$RSYNC_SECRET_FILE"
-
-# Create empty subdirs for excluded runtime directories
-for d in pg_replslot pg_dynshmem pg_notify pg_serial pg_snapshots pg_stat_tmp pg_subtrans; do
-    mkdir -p "$REPLICA_PGDATA/$d"
-done
 
 # Ensure empty pg_wal directory exists as a pgdata subdir
 if [[ "${REPLICA_WALDIR%/}" != "${REPLICA_PGDATA%/}/pg_wal" ]]; then
