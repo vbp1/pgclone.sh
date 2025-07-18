@@ -1017,7 +1017,7 @@ if [[ -n "${LIMIT_NET_BW:-}" ]]; then
     BW_PER_RSYNC_BPS=$(( (LIMIT_NET_BW_BPS + PARALLEL - 1) / PARALLEL ))
     BW_PER_RSYNC_KB=$(( (BW_PER_RSYNC_BPS + 1023) / 1024 ))
     (( BW_PER_RSYNC_KB < 1 )) && BW_PER_RSYNC_KB=1
-    log "Total bandwidth limit=$(format_bytes "$LIMIT_NET_BW_BPS")/s → per rsync=$BW_PER_RSYNC_KB KB/s"
+    log "Total bandwidth limit=$(( (LIMIT_NET_BW_BPS + 1023) / 1024 )) KB/s → per rsync=$BW_PER_RSYNC_KB KB/s"
     # Build reusable rsync bandwidth option array
     RSYNC_BWLIMIT_ARGS=(--bwlimit=$BW_PER_RSYNC_KB)
     # For single rsync operations (non-parallel) use total limit
