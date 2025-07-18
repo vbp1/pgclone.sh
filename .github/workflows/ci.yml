@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+          fetch-depth: 0
+
+      - name: Install dependencies (shellcheck, bats)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck bats
+
+      - name: Fetch bats-support & bats-assert helpers
+        run: |
+          mkdir -p tests/test_helper
+          rm -rf tests/test_helper/bats-support tests/test_helper/bats-assert
+          git clone --depth 1 https://github.com/bats-core/bats-support tests/test_helper/bats-support
+          git clone --depth 1 https://github.com/bats-core/bats-assert tests/test_helper/bats-assert
+
+      - name: Run shellcheck on all shell scripts
+        run: |
+          shopt -s globstar
+          # shellcheck will exit non-zero on issues
+          shellcheck **/*.sh
+
+      - name: Run BATS test suite
+        run: |
+          chmod +x ./run-tests.sh
+          ./run-tests.sh
