@@ -12,6 +12,7 @@
 - **Paranoid mode** with full checksum verification during copy (`--paranoid`)
 - **Unified progress indicator** – dynamic TTY bar or plain periodic lines for logs, plus aggregated rsync statistics
 - Streaming WAL with `pg_receivewal`
+- Optionally bypass replication traffic via SSH tunnel (`--bypass-rep-traffic`)
 - Automated testing/demo via Docker (`demo.sh`)
 - Debug-friendly flags: `--debug` (shell trace) and `--keep-run-tmp` (preserve temp files)
 - Can wipe an existing replica directory with `--drop-existing`
@@ -64,22 +65,24 @@ export PGDATABASE=dbname
     --ssh-user root \
     # --parallel 8  \   # optional override; default = CPU
     --verbose
+    # --bypass-rep-traffic \\    # forward PostgreSQL port via SSH tunnel \\
 ```
 
 **Parameters:**
-- `--pghost`           — address of the primary server
-- `--pguser`           — user with replication and backup privileges
-- `--primary-pgdata`   — path to PGDATA on the primary (required)
-- `--replica-pgdata`   — path to PGDATA on the replica (optional, defaults to value of `--primary-pgdata`)
-- `--ssh-key`          — private SSH key (optional; auto-detected from `~/.ssh/id_*` or SSH agent)
-- `--ssh-user`         — SSH user
-- `--parallel`         — number of parallel rsync jobs (default: *CPU cores*)
-- `--paranoid`         — enable checksum verification for every file (`rsync --checksum`). Slower but safest.
-- `--temp-waldir`      — temporary directory for storing WAL files streamed by `pg_receivewal` during the clone (optional; default: system temp dir). If the directory is auto-created by **pgclone**, it will be removed completely on exit; otherwise only its contents are cleaned up.
-- `--drop-existing`    — **dangerous**: remove any data found in the target `--replica-pgdata` and its `pg_wal` directory before starting the clone.
-- `--debug`            — run the script in *x-trace* mode (`set -x`), printing every executed command for troubleshooting.
-- `--slot`             — create and use an ephemeral physical replication slot (`pgclone_<pid>`). The slot is automatically dropped on completion or if the script terminates abnormally.
-- `--keep-run-tmp`     — keep the per-run temporary directory (shown in the log) instead of deleting it on exit.
+- `--pghost`             — address of the primary server
+- `--pguser`             — user with replication and backup privileges
+- `--primary-pgdata`     — path to PGDATA on the primary (required)
+- `--replica-pgdata`     — path to PGDATA on the replica (optional, defaults to value of `--primary-pgdata`)
+- `--ssh-key`            — private SSH key (optional; auto-detected from `~/.ssh/id_*` or SSH agent)
+- `--ssh-user`           — SSH user
+- `--parallel`           — number of parallel rsync jobs (default: *CPU cores*)
+- `--paranoid`           — enable checksum verification for every file (`rsync --checksum`). Slower but safest.
+- `--temp-waldir`        — temporary directory for storing WAL files streamed by `pg_receivewal` during the clone (optional; default: system temp dir). If the directory is auto-created by **pgclone**, it will be removed completely on exit; otherwise only its contents are cleaned up.
+- `--drop-existing`      — **dangerous**: remove any data found in the target `--replica-pgdata` and its `pg_wal` directory before starting the clone.
+- `--debug`              — run the script in *x-trace* mode (`set -x`), printing every executed command for troubleshooting. 
+- `--slot`               — create and use an ephemeral physical replication slot (`pgclone_<pid>`). The slot is automatically dropped on completion or if the script terminates abnormally.
+- `--keep-run-tmp`       -keep the per-run temporary directory (shown in the log) instead of deleting it on exit.
+- `--bypass-rep-traffic` — forward PostgreSQL port via SSH and connect locally (password optional; relies on trust auth over the tunnel).
 - `--insecure-ssh`     — disable strict host-key verification (`StrictHostKeyChecking=no`). Use **only** for testing; this opens the door for MITM attacks. By default, `pgclone` **requires** the primary host to be present in `~/.ssh/known_hosts` and aborts if the key is unknown.
 
 *Progress flags*

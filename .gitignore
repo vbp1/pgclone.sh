@@ -15,3 +15,5 @@ tests/test_helper/*
 # claude files
 CLAUDE.md
 .mcp.json
+# windows files
+.windsurf/
