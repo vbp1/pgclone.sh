@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export RUN_ID="pgclone-$(date +%s%N)"
+RUN_ID="pgclone-$(date +%s%N)"
+export RUN_ID
 
 cleanup_all() {
-  docker rm -f $(docker ps -aq --filter "label=pgclone-test-run=$RUN_ID") 2>/dev/null || true
+  docker rm -f "$(docker ps -aq --filter "label=pgclone-test-run=$RUN_ID")" 2>/dev/null || true
 }
 
 trap cleanup_all EXIT
