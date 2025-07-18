@@ -51,7 +51,8 @@ export PGDATABASE=dbname
 # ... some PG... environment variables 
 # see https://www.postgresql.org/docs/current/libpq-envars.html 
 
-./pgclone   
+./pgclone   \
+    --limit-net-bw 200M   
     --pghost <primary_host>  \
     --pgport 5432            \
     --pguser postgres        \
@@ -76,6 +77,7 @@ export PGDATABASE=dbname
 - `--ssh-key`            — private SSH key (optional; auto-detected from `~/.ssh/id_*` or SSH agent)
 - `--ssh-user`           — SSH user
 - `--parallel`           — number of parallel rsync jobs (default: *CPU cores*)
+- `--limit-net-bw`       — aggregate network bandwidth limit for all rsync workers. Accepts plain bytes (`5000000`) or a number with `K/k`, `M/m`, `G/g` suffix (`200M`, `500k`). Minimal allowed value: **10 000 B/s**. The limit is split evenly between `--parallel` workers via `rsync --bwlimit`. Optional.
 - `--paranoid`           — enable checksum verification for every file (`rsync --checksum`). Slower but safest.
 - `--temp-waldir`        — temporary directory for storing WAL files streamed by `pg_receivewal` during the clone (optional; default: system temp dir). If the directory is auto-created by **pgclone**, it will be removed completely on exit; otherwise only its contents are cleaned up.
 - `--drop-existing`      — **dangerous**: remove any data found in the target `--replica-pgdata` and its `pg_wal` directory before starting the clone.
@@ -84,6 +86,9 @@ export PGDATABASE=dbname
 - `--keep-run-tmp`       -keep the per-run temporary directory (shown in the log) instead of deleting it on exit.
 - `--bypass-rep-traffic` — forward PostgreSQL port via SSH and connect locally (password optional; relies on trust auth over the tunnel).
 - `--insecure-ssh`     — disable strict host-key verification (`StrictHostKeyChecking=no`). Use **only** for testing; this opens the door for MITM attacks. By default, `pgclone` **requires** the primary host to be present in `~/.ssh/known_hosts` and aborts if the key is unknown.
+
+*Network limit*
+- `--limit-net-bw` — see above; minimum 10 000 B/s.  Sets total throughput cap that the script divides among workers.
 
 *Progress flags*
 - `--progress`          — progress display mode: `auto` (default), `bar`, `plain`, `none`.
