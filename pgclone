@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="1.4.0"
+PGCLONE_VERSION="1.5.0"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -20,6 +20,8 @@ VERBOSE=0                   # 1 = print detailed progress/debug logs, 0 = quiet
 # Progress indicator defaults
 PROGRESS_MODE="auto"        # auto|bar|plain|none
 PROGRESS_INTERVAL=30        # seconds between plain-mode updates
+# Network bandwidth limit (bytes/s, accepts K/k, M/m, G/g suffix). Empty ⇒ no limit
+LIMIT_NET_BW=""
 
 # replication slot option (disabled by default)
 USE_SLOT=0                  # 1 = create temporary replication slot, 0 = disabled
@@ -541,7 +543,7 @@ parallel_rsync_module() {
 
     # LC_ALL=C is required to ensure consistent format for numeric fields
     # awk removes thousands separators (e.g. 1,000,000 -> 1000000)
-    LC_ALL=C rsync --list-only --recursive \
+    LC_ALL=C "$RSYNC_BIN" "${RSYNC_BWLIMIT_TOTAL_ARGS[@]}" --list-only --recursive \
       ${RSYNC_CHECKSUM_FLAG} \
       --password-file="$RSYNC_SECRET_FILE" \
       "rsync://replica@$PGHOST:$RSYNC_PORT/$module/" |
@@ -607,7 +609,7 @@ parallel_rsync_module() {
         awk -F'\t' '{print $2}' "$file_raw" > "$file_paths"
 
         # First attempt: count sizes of files that will be transferred using %l format.
-        if rsync -a --dry-run --relative --inplace \
+        if "$RSYNC_BIN" -a "${RSYNC_BWLIMIT_TOTAL_ARGS[@]}" --dry-run --relative --inplace \
               ${RSYNC_CHECKSUM_FLAG} \
               --exclude 'pgsql_tmp*' \
               --exclude 'pg_internal.init' \
@@ -621,7 +623,7 @@ parallel_rsync_module() {
  
         # Fallback: parse --stats output if first method produced zero/empty.
         if [[ -z "$dry_bytes" || ! "$dry_bytes" =~ ^[0-9]+$ || "$dry_bytes" -eq 0 ]]; then
-            rsync -a --dry-run --relative --inplace \
+            "$RSYNC_BIN" -a "${RSYNC_BWLIMIT_TOTAL_ARGS[@]}" --dry-run --relative --inplace \
                   ${RSYNC_CHECKSUM_FLAG} \
                   --exclude 'pgsql_tmp*' \
                   --exclude 'pg_internal.init' \
@@ -738,9 +740,7 @@ parallel_rsync_module() {
         logfile=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_rsync_"${module}"_"${idx}".XXXXXX)
         RSYNC_LOGFILES+=("$logfile")
         (
-            local RSYNC_BIN
-            RSYNC_BIN=$(command -v rsync)
-            exec "$RSYNC_BIN" -a --relative --inplace \
+            exec "$RSYNC_BIN" -a "${RSYNC_BWLIMIT_ARGS[@]}" --relative --inplace \
                   ${RSYNC_CHECKSUM_FLAG} \
                   --exclude 'pgsql_tmp*' \
                   --exclude 'pg_internal.init' \
@@ -817,6 +817,7 @@ Usage: pgclone [OPTIONS]
   --insecure-ssh        Disable known_hosts verification (equivalent to StrictHostKeyChecking=no) – NOT recommended (optional, default: disabled)
   --progress            Progress display mode: auto|bar|plain|none (optional, default: auto)
   --progress-interval   Seconds between plain progress updates (optional, default: 30)
+  --limit-net-bw        Aggregate network bandwidth limit for rsync (e.g. 200M, 500k). Optional, default: unlimited
   --verbose             Verbose output (optional, default: disabled)
   -v, --version         Print version and exit
   -h, --help            Show this help and exit
@@ -873,6 +874,8 @@ while getopts ':hv-:' opt; do
                     PROGRESS_MODE="$val" ;;
                 progress-interval)
                     PROGRESS_INTERVAL="$val" ;;
+                limit-net-bw)
+                    ;;
                 *) fatal "Unknown option --$long" ;;
             esac
 
@@ -905,6 +908,7 @@ while getopts ':hv-:' opt; do
                 bypass-rep-traffic) BYPASS_REP_TRAFFIC=1 ;;
                 progress)        PROGRESS_MODE="$val" ;;
                 progress-interval) PROGRESS_INTERVAL="$val" ;;
+                limit-net-bw)    LIMIT_NET_BW="$val" ;;
             esac
             ;;
         h) show_help=1    ;;
@@ -1003,6 +1007,26 @@ fi
 # Informative log about parallelism
 log "Using $PARALLEL parallel rsync worker(s)"
 
+# ---- Network bandwidth limit handling ----
+if [[ -n "${LIMIT_NET_BW:-}" ]]; then
+    LIMIT_NET_BW_BPS=$(bytes_from_str "$LIMIT_NET_BW")
+    [[ "$LIMIT_NET_BW_BPS" =~ ^[0-9]+$ ]] || fatal "Invalid --limit-net-bw value"
+    (( LIMIT_NET_BW_BPS >= 10000 )) || fatal "--limit-net-bw must be >= 10K (10000 bytes/s)"
+    # Split total limit across workers using ceiling division so that
+    # sum(per-worker) ≥ LIMIT_NET_BW_BPS (avoid losing bytes due to rounding)
+    BW_PER_RSYNC_BPS=$(( (LIMIT_NET_BW_BPS + PARALLEL - 1) / PARALLEL ))
+    BW_PER_RSYNC_KB=$(( (BW_PER_RSYNC_BPS + 1023) / 1024 ))
+    (( BW_PER_RSYNC_KB < 1 )) && BW_PER_RSYNC_KB=1
+    log "Total bandwidth limit=$(( (LIMIT_NET_BW_BPS + 1023) / 1024 )) KB/s → per rsync=$BW_PER_RSYNC_KB KB/s"
+    # Build reusable rsync bandwidth option array
+    RSYNC_BWLIMIT_ARGS=(--bwlimit=$BW_PER_RSYNC_KB)
+    # For single rsync operations (non-parallel) use total limit
+    BW_TOTAL_KB=$(( (LIMIT_NET_BW_BPS + 1023) / 1024 ))
+    RSYNC_BWLIMIT_TOTAL_ARGS=(--bwlimit=$BW_TOTAL_KB)
+    export RSYNC_BWLIMIT_ARGS
+    export RSYNC_BWLIMIT_TOTAL_ARGS
+fi
+
 # ---- TEMP_WALDIR handling ----
 if [[ -z "${TEMP_WALDIR:-}" ]]; then
     TEMP_WALDIR=$(TMPDIR="$RUN_TMPDIR" mktemp -d -t pgclone_temp.XXXXXX)
@@ -1096,6 +1120,9 @@ fi
 for t in ssh psql pg_ctl pg_receivewal rsync find du split awk sha256sum od ps pgrep; do
     command -v "$t" >/dev/null || fatal "$t not found"
 done
+
+# Determine rsync binary once (client side)
+RSYNC_BIN=$(command -v rsync)
 
 # ==== Protect against concurrent runs of pgclone for the same replica data directory. ====
 # The lock is automatically released when the script exits.
@@ -1333,7 +1360,10 @@ done
 [[ -z "$RSYNC_PORT" ]] && { echo "no free port"; exit 1; }
 echo "$RSYNC_PORT" > "$REMOTE_PORT"
 
-rsync --daemon --no-detach --config=$REMOTE_CONF --port=$RSYNC_PORT &
+RSYNC_BIN=$(command -v rsync)
+export RSYNC_BIN
+
+"$RSYNC_BIN" --daemon --no-detach --config="$REMOTE_CONF" --port="$RSYNC_PORT" &
 rsyncd_pid=$!
 wait
 REMOTE_RS
@@ -1390,7 +1420,7 @@ logfile=$(TMPDIR="$RUN_TMPDIR" mktemp -t pgclone_rsync_initial.XXXXXX)
 # when we will sync them
 # directories for the tablespaces should exist on replica host and 
 # pgclone user should have access to them
-rsync -a --delete ${RSYNC_CHECKSUM_FLAG} \
+"$RSYNC_BIN" -a "${RSYNC_BWLIMIT_TOTAL_ARGS[@]}" --delete ${RSYNC_CHECKSUM_FLAG} \
     --exclude 'pg_wal/' \
     --exclude 'base/' \
     --exclude 'postmaster.pid' \
