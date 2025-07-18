@@ -31,8 +31,9 @@ teardown() { stop_test_env; network_rm; }
   per=$(echo "$output" | grep -oE 'per rsync=[0-9]+' | awk -F= '{print $2}')
   assert_equal "$per" "100"
 
-  # Extract aggregated download speed line and verify it does not exceed ~400 KB/s (+10 % tolerance)
-  speed_kb=$(echo "$output" | grep -Eo 'sent .* \([0-9]+(\.[0-9]+)? [KMG]B/sec\)' | tail -n1 | awk -F'[ (]' '{print $(NF-1)" "$(NF)}' | awk '{val=$1; unit=$2; if(unit~/KB/)print val; else if(unit~/MB/)print val*1024; else if(unit~/GB/)print val*1024*1024;}')
+  # Extract aggregated download speed and verify it stays within the cap (+10 % tolerance)
+  speed_kb=$(echo "$output" | grep -Eo '[0-9]+(\.[0-9]+)?[KMG]B/sec' | tail -n1 | \
+    awk '{val=$0; sub(/B\/sec$/, "", val); unit=substr(val, length(val)-0, 1); num=val; sub(/[KMG]$/, "", num); if(unit=="K") print num; else if(unit=="M") print num*1024; else if(unit=="G") print num*1024*1024; }')
   [ -n "$speed_kb" ] || { echo "speed not found"; false; }
   max_kb=$(( 400 + 40 ))   # 400 KB/s limit +10 % tolerance
   (( $(printf '%.0f' "$speed_kb") <= max_kb ))

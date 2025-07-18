@@ -9,6 +9,7 @@
 - **Physical replication only** (PostgreSQL 15+)
 - Optional temporary replication slot may be created for `pg_receivewal` (`--slot` flag)
 - **Parallel database sync via rsync+rsyncd** (default workers = *CPU cores*)
+- **Aggregate network bandwidth limit** for all rsync traffic via `--limit-net-bw` (cap is split across workers)
 - **Paranoid mode** with full checksum verification during copy (`--paranoid`)
 - **Unified progress indicator** – dynamic TTY bar or plain periodic lines for logs, plus aggregated rsync statistics
 - Streaming WAL with `pg_receivewal`
