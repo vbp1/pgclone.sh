@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-PGCLONE_VERSION="1.3.3"
+PGCLONE_VERSION="1.4.0"
 
 # ==== Default parameters ====
 PGPORT=5432                 # TCP port of the primary Postgres instance (default 5432)
@@ -27,6 +27,9 @@ SLOT_NAME=""               # Assigned when USE_SLOT=1
 
 # SSH security option
 INSECURE_SSH=0              # 1 = disable StrictHostKeyChecking (MITM risk); 0 = enforced by default
+BYPASS_REP_TRAFFIC=0        # 1 = forward primary PGPORT locally via SSH and connect locally
+
+BYPASS_TUN_PORT_RANGE="55000..55100"   # Local port range to search for free port when creating SSH tunnel
 
 RSYNCD_PORT_RANGE="45000..45100"   # Port range to search for a free TCP port when
                                    # starting the transient rsync daemon on the primary
@@ -59,6 +62,8 @@ RSYNC_LOGFILES=()
 RUN_TMPDIR=""
 PIDFILE=""
 PGCLONE_MAIN_PID=""
+SSH_TUNNEL_PID=""
+SSH_TUNNEL_WATCHDOG_PID=""
 
 # ==== Logging ====
 log() { [[ "$VERBOSE" == "1" ]] && echo "[$(date '+%F %T')] [pgclone] $*" >&2; return 0; }
@@ -113,6 +118,24 @@ cleanup() {
         wait_and_kill_process "$RSYNCD_WATCHDOG_PID" "rsyncd watchdog"
     fi
 
+    # Drop temporary replication slot before closing SSH tunnel (if any)
+    if [[ "$USE_SLOT" == "1" && -n "${SLOT_NAME:-}" ]]; then
+        log "Dropping replication slot $SLOT_NAME..."
+        drop_replication_slot "$SLOT_NAME" || true
+    fi
+
+    # Stop SSH tunnel watchdog
+    if [[ -n "${SSH_TUNNEL_WATCHDOG_PID:-}" ]]; then
+        kill "$SSH_TUNNEL_WATCHDOG_PID" 2>/dev/null || true
+        wait_and_kill_process "$SSH_TUNNEL_WATCHDOG_PID" "ssh tunnel watchdog"
+    fi
+
+    # Stop SSH tunnel
+    if [[ -n "${SSH_TUNNEL_PID:-}" ]]; then
+        kill "$SSH_TUNNEL_PID" 2>/dev/null || true
+        wait_and_kill_process "$SSH_TUNNEL_PID" "ssh tunnel"
+    fi
+
     # Stop psql watchdog
     if [[ -n "${PSQL_WATCHDOG_PID:-}" ]]; then
         kill "$PSQL_WATCHDOG_PID" 2>/dev/null || true
@@ -135,14 +158,6 @@ cleanup() {
             log "Removing temp WAL dir $TEMP_WALDIR content..."
             find "$TEMP_WALDIR" -mindepth 1 -delete
         fi
-    fi
-
-    # Drop temporary replication slot if it was created
-    if [[ "$USE_SLOT" == "1" && -n "${SLOT_NAME:-}" ]]; then
-        log "Dropping replication slot $SLOT_NAME via pg_receivewal..."
-        pg_receivewal \
-            --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
-            --no-password --drop-slot --slot="$SLOT_NAME" >/dev/null 2>&1 || true
     fi
 
     # --- ensure no children processes remain -------------------
@@ -197,6 +212,18 @@ ssh_exec() {
     # Usage: ssh_exec "cmd arg1 arg2"
     # shellcheck disable=SC2029
     ssh "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" "$@"
+}
+
+# --- helper: drop replication slot safely --------------------------------
+drop_replication_slot() {
+    local slot=$1
+    # Try via pg_receivewal using current connection params (may be via SSH tunnel)
+    pg_receivewal --host="$PGHOST_CONN" --port="$PGPORT_CONN" --username="$PGUSER" \
+        --no-password --drop-slot --slot="$slot" >/dev/null 2>&1 && return 0
+    # Fallback: execute on primary via SSH directly
+    ssh_exec psql -At -U "$PGUSER" -c "SELECT pg_drop_replication_slot('$slot')" >/dev/null 2>&1 && return 0
+    log "WARNING: failed to drop replication slot $slot"
+    return 1
 }
 
 terminate_pid() {
@@ -317,7 +344,7 @@ wait_for_replication_start() {
 
         # Check pg_stat_replication for our application_name
         local result
-        result=$(psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" \
+        result=$(psql -h "$PGHOST_CONN" -p "$PGPORT_CONN" -U "$PGUSER" \
             -w -X -A -t -v ON_ERROR_STOP=1 \
             -c "SELECT EXISTS (SELECT 1 FROM pg_stat_replication WHERE application_name = '$appname')::int;")
         if [[ "${result//[[:space:]]/}" == "1" ]]; then
@@ -771,27 +798,28 @@ print_usage () {
     cat <<EOF
 Usage: pgclone [OPTIONS]
 
-  --pghost             Primary host (required)
-  --pgport             Primary port (default 5432)
-  --pguser             Primary user (required)
-  --primary-pgdata     Primary PGDATA path (required)
-  --replica-pgdata     Replica PGDATA path (optional, default: same as --primary-pgdata)
-  --replica-waldir     Replica pg_wal path (optional, default: <replica-pgdata>/pg_wal)
-  --ssh-key            SSH private key file (optional, auto-detected if omitted)
-  --ssh-user           SSH user (login on primary host) (required)
-  --temp-waldir        Temporary WAL directory (optional, default: system tmp)
-  --parallel           Number of parallel rsync jobs (optional, default: CPU)
-  --paranoid           Enable checksum verification (rsync --checksum, VERY SLOW) (optional, default: disabled)
-  --drop-existing      Remove existing data in replica pgdata and pg_wal before cloning (optional, default: disabled)
-  --debug              Enable bash trace (set -x) for troubleshooting (optional, default: disabled)
-  --keep-run-tmp       Preserve temporary run directory after completion (for debugging) (optional, default: disabled)
-  --slot               Use a temporary physical replication slot (auto-named, disabled by default) (optional, default: disabled)
-  --insecure-ssh       Disable known_hosts verification (equivalent to StrictHostKeyChecking=no) – NOT recommended (optional, default: disabled)
-  --progress           Progress display mode: auto|bar|plain|none (optional, default: auto)
-  --progress-interval  Seconds between plain progress updates (optional, default: 30)
-  --verbose            Verbose output (optional, default: disabled)
-  -v, --version        Print version and exit
-  -h, --help           Show this help and exit
+  --pghost              Primary host (required)
+  --pgport              Primary port (default 5432)
+  --pguser              Primary user (required)
+  --primary-pgdata      Primary PGDATA path (required)
+  --replica-pgdata      Replica PGDATA path (optional, default: same as --primary-pgdata)
+  --replica-waldir      Replica pg_wal path (optional, default: <replica-pgdata>/pg_wal)
+  --ssh-key             SSH private key file (optional, auto-detected if omitted)
+  --ssh-user            SSH user (login on primary host) (required)
+  --temp-waldir         Temporary WAL directory (optional, default: system tmp)
+  --parallel            Number of parallel rsync jobs (optional, default: CPU)
+  --paranoid            Enable checksum verification (rsync --checksum, VERY SLOW) (optional, default: disabled)
+  --drop-existing       Remove existing data in replica pgdata and pg_wal before cloning (optional, default: disabled)
+  --debug               Enable bash trace (set -x) for troubleshooting (optional, default: disabled)
+  --keep-run-tmp        Preserve temporary run directory after completion (for debugging) (optional, default: disabled)
+  --slot                Use a temporary physical replication slot (auto-named, disabled by default) (optional, default: disabled)
+  --bypass-rep-traffic  Forward PostgreSQL port via SSH and connect locally (optional, default: disabled)
+  --insecure-ssh        Disable known_hosts verification (equivalent to StrictHostKeyChecking=no) – NOT recommended (optional, default: disabled)
+  --progress            Progress display mode: auto|bar|plain|none (optional, default: auto)
+  --progress-interval   Seconds between plain progress updates (optional, default: 30)
+  --verbose             Verbose output (optional, default: disabled)
+  -v, --version         Print version and exit
+  -h, --help            Show this help and exit
 EOF
 }
 
@@ -834,12 +862,13 @@ while getopts ':hv-:' opt; do
                 ssh-user)         ;;
                 temp-waldir)      ;;
                 parallel)         ;;
-                paranoid)         needs_arg=0 ;;
-                drop-existing)    needs_arg=0 ;;
-                debug)            needs_arg=0 ;;
-                keep-run-tmp)     needs_arg=0 ;;
-                slot)             needs_arg=0 ;;
-                insecure-ssh)     needs_arg=0 ;;
+                paranoid)           needs_arg=0 ;;
+                drop-existing)      needs_arg=0 ;;
+                debug)              needs_arg=0 ;;
+                keep-run-tmp)       needs_arg=0 ;;
+                slot)               needs_arg=0 ;;
+                insecure-ssh)       needs_arg=0 ;;
+                bypass-rep-traffic) needs_arg=0 ;;
                 progress)
                     PROGRESS_MODE="$val" ;;
                 progress-interval)
@@ -873,6 +902,7 @@ while getopts ':hv-:' opt; do
                 keep-run-tmp)     KEEP_RUN_TMP=1 ;;
                 slot)             USE_SLOT=1 ;;
                 insecure-ssh)     INSECURE_SSH=1 ;;
+                bypass-rep-traffic) BYPASS_REP_TRAFFIC=1 ;;
                 progress)        PROGRESS_MODE="$val" ;;
                 progress-interval) PROGRESS_INTERVAL="$val" ;;
             esac
@@ -956,7 +986,11 @@ if [[ -z "${PGPASSWORD:-}" ]]; then
     if [[ -r "$HOME/.pgpass" ]]; then
         log "Using password from ~/.pgpass"
     else
-        fatal "Authentication required: set PGPASSWORD or create readable ~/.pgpass"
+        if [[ "$BYPASS_REP_TRAFFIC" == "1" ]]; then
+            log "No password provided; relying on trust authentication via SSH tunnel (--bypass-rep-traffic)"
+        else
+            fatal "Authentication required: set PGPASSWORD or create readable ~/.pgpass"
+        fi
     fi
 else
     export PGPASSWORD          # make it visible to subprocesses
@@ -1002,6 +1036,56 @@ fi
 if [[ -n "${SSH_KEY:-}" ]]; then
     SSH_OPTS+=("-i" "$SSH_KEY")
 fi
+
+# ------- SSH tunnel for --bypass-rep-traffic -----------------------------
+# Establish local port forwarding BEFORE any database connections are opened
+if [[ "$BYPASS_REP_TRAFFIC" == "1" ]]; then
+    log "--bypass-rep-traffic enabled: forwarding PostgreSQL port via SSH"
+    range_min="${BYPASS_TUN_PORT_RANGE%%..*}"
+    range_max="${BYPASS_TUN_PORT_RANGE##*..}"
+    pmin=$range_min; pmax=$range_max
+    TUN_PORT=""
+    for ((p=pmin; p<=pmax; p++)); do
+        (echo >/dev/tcp/127.0.0.1/$p) >/dev/null 2>&1 && continue   # port busy
+        TUN_PORT=$p; break
+    done
+    [[ -z "$TUN_PORT" ]] && fatal "No free local port for SSH tunnel"
+
+    ssh -N -L "$TUN_PORT:127.0.0.1:$PGPORT" "${SSH_OPTS[@]}" "$SSH_USER@$PGHOST" &
+    SSH_TUNNEL_PID=$!
+
+    # Watchdog: terminate tunnel if main dies, terminate main if tunnel dies
+    (
+        child_pid=$SSH_TUNNEL_PID
+        main_pid=$PGCLONE_MAIN_PID
+        while kill -0 "$child_pid" 2>/dev/null && kill -0 "$main_pid" 2>/dev/null; do
+            sleep 1
+        done
+        if ! kill -0 "$main_pid" 2>/dev/null; then
+            log "[ssh_tunnel_watchdog] Main process $main_pid died -> terminating ssh tunnel PID=$child_pid"
+            watchdog_terminate "$child_pid" "ssh tunnel"
+            exit 0
+        fi
+        log "[ssh_tunnel_watchdog] SSH tunnel PID=$child_pid exited"
+        log "[ssh_tunnel_watchdog] Terminating main process $main_pid"
+        kill -TERM "$main_pid" 2>/dev/null
+    ) &
+    SSH_TUNNEL_WATCHDOG_PID=$!
+
+    # Wait up to 6 s (30×200 ms) for the local tunnel port to start listening
+for _ in {1..30}; do
+        (echo >/dev/tcp/127.0.0.1/$TUN_PORT) >/dev/null 2>&1 && break
+        sleep 0.2
+    done
+    (echo >/dev/tcp/127.0.0.1/$TUN_PORT) >/dev/null 2>&1 || fatal "SSH tunnel failed to establish"
+    PGHOST_CONN="127.0.0.1"
+    PGPORT_CONN="$TUN_PORT"
+else
+    PGHOST_CONN="$PGHOST"
+    PGPORT_CONN="$PGPORT"
+fi
+# ------------------------------------------------------------------------
+
 
 # ==== Check that we are not running as root ====
 if [[ "$(id -u)" -eq 0 ]]; then
@@ -1066,7 +1150,7 @@ PSQL_IN="$tmp_psql_dir/in"
 PSQL_OUT="$tmp_psql_dir/out"
 mkfifo "$PSQL_IN" "$PSQL_OUT"
 
-psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" \
+psql -h "$PGHOST_CONN" -p "$PGPORT_CONN" -U "$PGUSER" \
     -w -X -A -t -v ON_ERROR_STOP=1 <"$PSQL_IN" >"$PSQL_OUT" &
 PSQL_PID=$!
 exec 3>"$PSQL_IN"
@@ -1107,7 +1191,7 @@ if [[ "$USE_SLOT" == "1" ]]; then
     # Create the slot via pg_receivewal utility (doc: it exits immediately after creating)
     log "Creating replication slot $SLOT_NAME via pg_receivewal..."
     pg_receivewal \
-        --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
+        --host="$PGHOST_CONN" --port="$PGPORT_CONN" --username="$PGUSER" \
         --no-password --create-slot --if-not-exists --slot="$SLOT_NAME" >/dev/null 2>&1
 
     pg_rwal_slot_args=(--slot="$SLOT_NAME")
@@ -1123,7 +1207,7 @@ pg_rwal_args=()
 
 find "$TEMP_WALDIR" -mindepth 1 -delete
 PGAPPNAME="$PG_RCV_APPNAME" pg_receivewal \
-    --host="$PGHOST" --port="$PGPORT" --username="$PGUSER" \
+    --host="$PGHOST_CONN" --port="$PGPORT_CONN" --username="$PGUSER" \
     --no-password --directory="$TEMP_WALDIR" \
     "${pg_rwal_slot_args[@]}" \
     "${pg_rwal_args[@]}" >"$TEMP_WALDIR/pg_receivewal.log" 2>&1 &
@@ -1395,7 +1479,7 @@ wait_and_kill_process "$PSQL_PID" "persistent psql session"
 # for STOP_LSN and wait until that file shows up in TEMP_WALDIR.
 
 STOP_WALFILE=$(
-  psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -w -X -A -t \
+  psql -h "$PGHOST_CONN" -p "$PGPORT_CONN" -U "$PGUSER" -w -X -A -t \
     -c "SELECT pg_walfile_name('$STOP_LSN');" | tr -d '[:space:]'
 )
 log "Waiting for WAL file $STOP_WALFILE..."
