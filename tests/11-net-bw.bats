@@ -12,9 +12,6 @@ teardown() { stop_test_env; network_rm; }
   start_primary 15
   start_replica 15
 
-  # Enlarge dataset so transfer duration reveals bandwidth cap (~20 MB)
-  docker exec -u postgres "$PRIMARY" bash -c "dd if=/dev/zero of=/var/lib/postgresql/data/bigfile bs=1M count=20"
-
   # Run pgclone with known params. Keep dataset tiny (fresh cluster) so job finishes quickly.
   run docker exec -u postgres "$REPLICA" bash -c "export PGPASSWORD=postgres; \
     pgclone --pghost pg-primary --pguser postgres \
